@@ -1,16 +1,24 @@
-﻿/*                                                              PRODBYSIMO
-                                                 MADE WITH TOOLKIT V143 /MDd WIN 10.0.26100.0 SDK
-    * ==================================================== VERSION 0.0.2 START ===================================================
-    * finally made the parser respect every node in the .n3 instead of just grabbing the first mesh lol
-    * hooked up local -> world transform chains, so objects don't all chill at 0,0,0
-    * added primitive group support, so submeshes can render with the right material instead of being mashed togfether
-    * materials are now actually pulled from the node’s STXT tags, with fallbacks if they’re missing (white, black, flat normal)
-    * implemented UV transforms + UV set switching (yep, STUS/SCVU), pushed as uniforms into the shader
-    * shader updated with alpha cutout discard, so trees and leaves don’t look like cardboard anymore
-    * draw calls now go through a per-node DrawCmd, so each piece has its own mesh, textures, transforms, and group index
-    * added a bunch of new tag handlers (joints, anim stuff, uv/scaling junk, etc.) so files stop spitting errors at random
-    * cleaned up & fixed some broken skips where the parser used to desync and nuke the whole model
-    * ==================================================== VERSION 0.0.2 END =====================================================
+﻿/*                                         PRODBYSIMO
+                          MADE WITH TOOLKIT V143 /MDd WIN 10.0.26100.0 SDK
+    * ================================ VERSION 0.0.2 START ================================
+    * Finally made the parser respect every node in the .n3 instead of 
+	* just grabbing the first mesh lol
+    * Hooked up local -> world transform chains, so objects don't all chill at 0,0,0
+    * Added primitive group support, so submeshes can render with the 
+	* right material instead of being mashed togfether
+    * Materials are now actually pulled from the node’s STXT tags, 
+	* with fallbacks if they’re missing (white, black, flat normal)
+    * Implemented UV transforms + UV set switching (yep, STUS/SCVU), 
+	* pushed as uniforms into the shader
+    * Shader updated with alpha cutout discard, so trees and 
+	* leaves don’t look like cardboard anymore
+    * Draw calls now go through a per-node DrawCmd, so each piece has its own mesh,
+	* textures, transforms, and group index
+    * Added a bunch of new tag handlers (joints, anim stuff, uv/scaling junk, etc.) 
+	* so files stop spitting errors at random
+    * Cleaned up & fixed some broken skips where the parser used to desync 
+	* and break the whole model
+    * ================================ VERSION 0.0.2 END ================================
 */
 
 #include <glad/glad.h>
