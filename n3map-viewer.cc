@@ -1,6 +1,8 @@
 ﻿/*                                         PRODBYSIMO
-                          MADE WITH TOOLKIT V143 /MDd WIN 10.0.26100.0 SDK
-    * ================================ VERSION 0.0.2 START ================================
+                          MADE WITH TOOLKIT V143 /MDd WIN 10.0.26100.0 SDK+
+
+                                            09/01/2025
+    * ================================ VERSION 0.0.2 START =============================
     * Finally made the parser respect every node in the .n3 instead of 
 	* just grabbing the first mesh lol
     * Hooked up local -> world transform chains, so objects don't all chill at 0,0,0
@@ -18,8 +20,25 @@
 	* so files stop spitting errors at random
     * Cleaned up & fixed some broken skips where the parser used to desync 
 	* and break the whole model
-    * ================================ VERSION 0.0.2 END ================================
+    * ================================ VERSION 0.0.2 END ===============================
+    
+                                           09/02/2025
+    * ================================ VERSION 0.0.3 START  ============================
+    * added glm and nlohmann::json libs
+    * 
+    * ================================ VERSION 0.0.3 END ===============================
 */
+
+#include "glm.hpp"
+#include "gtc/matrix_transform.hpp"
+#include "gtc/type_ptr.hpp"
+#include "json.hpp"
+using json = nlohmann::json;
+
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#undef APIENTRY
 
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
@@ -36,6 +55,22 @@
 #include <DirectXTex/DirectXTex.h>
 #include <random>
 #include <unordered_set>
+
+struct cerr_t {
+    template<typename T>
+    cerr_t& operator<<(const T& value) {
+        std::cerr << "\033[38;2;255;0;0m" << value << "\033[0m";
+        return *this;
+    }
+
+    cerr_t& operator<<(std::ostream& (*manip)(std::ostream&)) {
+        std::cerr << manip;
+        return *this;
+    }
+};
+
+inline cerr_t errout;
+
 
 std::unordered_map<std::string, GLuint> gTexCache;
 GLuint gWhiteTex = 0;
@@ -56,6 +91,75 @@ T clamp(T v, T lo, T hi) {
 GLuint gridVAO = 0, gridVBO = 0;
 GLsizei gridVertexCount = 0;
 constexpr double M_PI = 3.14159265358979323846;
+
+struct ObjVertex { float px, py, pz; float nx, ny, nz; float tx, ty, tz; float bx, by, bz; float u0, v0; float u1, v1; float cr, cg, cb, ca; float w0, w1, w2, w3; uint8_t j0, j1, j2, j3; };
+
+struct Nvx2Group {
+    uint32_t firstVertex = 0;
+    uint32_t numVertices = 0;
+    uint32_t firstTriangle = 0;
+    uint32_t numTriangles = 0;
+    uint32_t firstEdge = 0;
+    uint32_t numEdges = 0;
+
+    uint32_t firstIndex()   const { return firstTriangle * 3; }
+    uint32_t indexCount()   const { return numTriangles * 3; }
+    uint32_t baseVertex()   const { return firstVertex; }
+};
+
+struct Mesh {
+    std::vector<ObjVertex> verts;
+    std::vector<uint32_t> idx;
+    std::vector<Nvx2Group> groups;
+    GLuint vao = 0, vbo = 0, ebo = 0;
+};
+
+void setIdentity(float* mat) {
+    mat[0] = 1.0f; mat[4] = 0.0f; mat[8] = 0.0f; mat[12] = 0.0f;
+    mat[1] = 0.0f; mat[5] = 1.0f; mat[9] = 0.0f; mat[13] = 0.0f;
+    mat[2] = 0.0f; mat[6] = 0.0f; mat[10] = 1.0f; mat[14] = 0.0f;
+    mat[3] = 0.0f; mat[7] = 0.0f; mat[11] = 0.0f; mat[15] = 1.0f;
+}
+
+struct DrawCmd {
+    Mesh mesh;
+    GLuint tex[4];
+    bool   has[4];
+    float  worldMatrix[16];
+    int    group = -1;
+
+    float uvXform[4][4];
+    int   uvSet[4];
+
+    void applyUVTransforms(GLuint shaderProgram) {
+        for (int i = 0; i < 4; ++i) {
+            std::string uniformName = "UvXform[" + std::to_string(i) + "]";
+            GLint loc = glGetUniformLocation(shaderProgram, uniformName.c_str());
+            if (loc >= 0) {
+                glUniform4fv(loc, 1, uvXform[i]);
+            }
+        }
+        GLint uvSetLoc = glGetUniformLocation(shaderProgram, "UvSet[0]");
+        if (uvSetLoc >= 0) {
+            glUniform1iv(uvSetLoc, 4, uvSet);
+        }
+    }
+
+    DrawCmd() {
+        memset(tex, 0, sizeof(tex));
+        memset(has, 0, sizeof(has));
+        setIdentity(worldMatrix);
+        for (int s = 0; s < 4; ++s) {
+            uvXform[s][0] = 1.0f;
+            uvXform[s][1] = 1.0f;
+            uvXform[s][2] = 0.0f;
+            uvXform[s][3] = 0.0f;
+            uvSet[s] = 0;
+        }
+    }
+};
+
+std::vector<DrawCmd> sceneDraws;
 
 float targetX = 0.0f, targetY = 0.0f, targetZ = 0.0f;
 
@@ -83,7 +187,7 @@ static void CheckShader(GLuint sh, const char* name) {
     if (!ok) {
         GLint len = 0; glGetShaderiv(sh, GL_INFO_LOG_LENGTH, &len);
         std::string log(len, '\0'); glGetShaderInfoLog(sh, len, nullptr, log.data());
-        std::cerr << "[SHADER COMPILE ERROR] " << name << "\n" << log << "\n";
+        errout << "[SHADER COMPILE ERROR] " << name << "\n" << log << "\n";
     }
 }
 static void CheckProgram(GLuint prog) {
@@ -91,7 +195,7 @@ static void CheckProgram(GLuint prog) {
     if (!ok) {
         GLint len = 0; glGetProgramiv(prog, GL_INFO_LOG_LENGTH, &len);
         std::string log(len, '\0'); glGetProgramInfoLog(prog, len, nullptr, log.data());
-        std::cerr << "[PROGRAM LINK ERROR]\n" << log << "\n";
+        errout << "[PROGRAM LINK ERROR]\n" << log << "\n";
     }
 }
 
@@ -132,13 +236,13 @@ GLuint LoadDDS(const std::string& path) {
     DirectX::TexMetadata meta;
     HRESULT hr = DirectX::LoadFromDDSFile(wpath.c_str(), DirectX::DDS_FLAGS_NONE, &meta, image);
     if (FAILED(hr)) {
-        if (debug_output) std::cout << "[TEX ERR] Failed to load DDS: " << path << "\n";
+        if (debug_output) errout << "[TEX ERR] Failed to load DDS: " << path << "\n";
         return 0;
     }
 
     const DirectX::Image* img = image.GetImage(0, 0, 0);
     if (!img) {
-        if (debug_output) std::cout << "[TEX ERR] No image data: " << path << "\n";
+        if (debug_output) errout << "[TEX ERR] No image data: " << path << "\n";
         return 0;
     }
 
@@ -226,13 +330,6 @@ struct Vec4 {
     Vec4(float x_, float y_, float z_, float w_) : x(x_), y(y_), z(z_), w(w_) {}
 };
 
-void setIdentity(float* mat) {
-    mat[0] = 1.0f; mat[4] = 0.0f; mat[8] = 0.0f; mat[12] = 0.0f;
-    mat[1] = 0.0f; mat[5] = 1.0f; mat[9] = 0.0f; mat[13] = 0.0f;
-    mat[2] = 0.0f; mat[6] = 0.0f; mat[10] = 1.0f; mat[14] = 0.0f;
-    mat[3] = 0.0f; mat[7] = 0.0f; mat[11] = 0.0f; mat[15] = 1.0f;
-}
-
 
 void multiplyMatrices(float* r, const float* a, const float* b) {
     for (int row = 0; row < 4; ++row) {
@@ -287,7 +384,7 @@ void rotateXMatrix(float* matrix, float angle) {
 }
 
 void createPerspectiveMatrix(float* m, float fov, float aspect, float znear, float zfar) {
-    float f = 1.0f / tan(fov * M_PI / 180.0f / 2.0f);
+    float f = 1.0f / tanf(fov * static_cast<float>(M_PI) / 180.0f / 2.0f);
     for (int i = 0; i < 16; i++) m[i] = 0;
     m[0] = f / aspect;
     m[5] = f;
@@ -427,8 +524,48 @@ void buildTransformMatrixColumnMajor(float* mat, const Vec3& pos, const Vec4& ro
 
 }
 
+
+
 class Parser {
+public:
+
+    template<typename T>
+    T read_n3_value() {
+        T v{};
+        this->n3file.read(reinterpret_cast<char*>(&v), sizeof(T));
+        return v;
+    }
+    static const std::unordered_set<std::string>& ValidFourCC() {
+        static const std::unordered_set<std::string> s{
+            "LDOM","CHRN","LKSN","LNKS","ANIM","TNJN","NJNU",
+            "JONT","NOJA","NOJB","NOJC","NOJD","NOJE","NOJF",
+            "NOJG","NOJH","NOJI","NOJJ","NOJK","NOJL","NOJM",
+            "NOJN","NOJO","NOJP","NOJQ","NOJR","NOJS","NOJT",
+            "TRAV","NFRT","LBOX","NSHC","TXTS","TLFS","CEVS",
+            "HSAC","RDHS","PTNM","HSEM","SEMS","IRGP","FKSN",
+            "GRFS","DNM<","DNM>","LDM>","LDM<","EOF_","_FOE"
+        };
+        return s;
+    }
+
+    bool should_reverse_fourcc(const std::string& raw) {
+        static const std::unordered_set<std::string> reversed_tags{
+            "3BEN", "MODL", "CHRN", "MINA", "TNOJ", "XOBL", "VART",
+            "NTJN", "UNJN", "TRFN", "CHSN", "MESH", "PRIG", "NSKF",
+            "SFRG", "SHDR", "MNTP", "SMES", "CASH"
+        };
+        return reversed_tags.count(raw) > 0;
+    }
+
+
 private:
+
+    bool is_valid_fourcc(const std::string& t) {
+        return t.size() == 4 && ValidFourCC().count(t) > 0;
+    }
+
+
+
     std::string filepath;
     std::ifstream n3file;
     std::string byteorder;
@@ -437,63 +574,117 @@ private:
     std::string n3modelname;
     std::vector<std::shared_ptr<Node>> n3node_list;
 
-    const std::unordered_set<std::string> Known = {
-        ">MDL","<MDL",">MND","<MND","EOF_",
-        "MESH","MNMT","MATE","STXT",
-        "ANIM","VART","NSKL","SKNL","NJNT","NJMS","JONT","JOMS",
-        "BJNT","SJNT","TNOJ","NOJT",
-        "ROTN","POSI","SCAL","RPIV","VIPR","SPIV","VIPS",
-        "SVSP","PSVS","SLKV","VKLS","LBOX","BASE","ESAB",
-        "SHDR","SSTA","SLPT","ANNO","SPNM","SVCN","SANI","MNTP","SMSH","SSHD","SVRT","SANM",
-        "SINT","SFLT","SVEC","SFRG","SAGR","RGAS",
-        "PGRI","NSKF","BGFR","SFGI","BGJP","SJID",
-        "SMID","DIMS","SMAD","DAMS","SEMD","SACD","SRMN","SRMX","SGRV","SPST","SCVR","SCVS","SCVT","SPCT","STDL",
-        "SLOP","SROF","SBBO","SSTS","SCVU","SVAF",
-        "STUS","SSPI",
-        "EFRQ","PLFT","PSMN","PSMX","PSVL","PRVL","PSZE","PMSS","PTMN","PVLF","PAIR","PRED","PGRN","PBLU","PALP",
-        "SCVA","SCVB","SCVD","SCVE","SCVF","SCVH","SCVJ","SCVL","STMM","SCVN","SCVQ","SCVC","SCVM",
-        "LDOM","NRHC","LKSN","LNKS","MINA","TNJN","NJNU",
-        "NOJA","NOJB","NOJC","NOJD","NOJE","NOJF","NOJG","NOJH","NOJI","NOJJ","NOJK","NOJL","NOJM","NOJN","NOJO","NOJP","NOJQ","NOJR","NOJS","NOJT",
-        "TRAV","NFRT","XOBL","NSHC","TXTS","TLFS","CEVS","HSAC","RDHS","PTNM","HSEM","SEMS","IRGP","FKSN","GRFS","EDFR","CASH"
-    };
-
-    template<typename T>
-    T read_n3_value() { T v{}; n3file.read(reinterpret_cast<char*>(&v), sizeof(T)); return v; }
-
     std::string read_n3_string() {
         uint16_t len = read_n3_value<uint16_t>();
-        if (len == 0) return {};
-        std::string s; s.resize(len);
-        n3file.read(&s[0], len);
+        std::string s;
+        if (len) {
+            s.resize(len);
+            n3file.read(&s[0], len);
+        }
         return s;
     }
-    std::string peek_fourcc(std::ifstream& f, const std::string& byteorder) {
-        std::streampos p = f.tellg();
-        uint32_t v = 0;
-        f.read(reinterpret_cast<char*>(&v), sizeof(v));
-        f.clear(); f.seekg(p);
+
+    std::string read_n3_fourcc() {
         char b[4];
-        if (byteorder == "little") { b[0] = v & 0xFF; b[1] = (v >> 8) & 0xFF; b[2] = (v >> 16) & 0xFF; b[3] = (v >> 24) & 0xFF; }
-        else { b[3] = v & 0xFF; b[2] = (v >> 8) & 0xFF; b[1] = (v >> 16) & 0xFF; b[0] = (v >> 24) & 0xFF; }
-        return std::string(b, 4);
+        if (!n3file.read(b, 4)) throw std::runtime_error("eof");
+        std::string tag(b, 4);
+        if (should_reverse_fourcc(tag)) {
+            std::reverse(tag.begin(), tag.end());
+        }
+        return tag;
     }
+
     bool looks_like_tag(const std::string& t) {
         if (t.size() != 4) return false;
-        for (char c : t) if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '<' || c == '>' || c == '_')) return false;
+        for (char c : t) {
+            if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '<' || c == '>'))
+                return false;
+        }
         return true;
+    }
+
+    bool peek_known_four(std::streampos at, std::string& out) {
+        if (at < 0) return false;
+        std::streampos p = n3file.tellg();
+        n3file.clear();
+        n3file.seekg(at);
+
+        char b[4];
+        if (!n3file.read(b, 4)) { n3file.clear(); n3file.seekg(p); return false; }
+
+        std::string t(b, 4);
+        n3file.clear();
+        n3file.seekg(p);
+        if (!is_valid_fourcc(t)) return false;
+        out = std::move(t);
+        return true;
+    }
+    bool resync_to_next_known(std::size_t maxScan = 1 << 20) {
+        std::streampos start = n3file.tellg();
+        for (std::size_t i = 0; i < maxScan && n3file.good(); ++i) {
+            std::string t;
+            std::streampos pos = start + static_cast<std::streamoff>(i);
+            if (!peek_known_four(pos, t)) continue;
+            n3file.clear();
+            n3file.seekg(pos);
+            return true;
+        }
+        n3file.clear();
+        n3file.seekg(start);
+        return false;
+    }
+
+    std::string peek_fourcc(std::ifstream& f, const std::string& byteorder) {
+        std::streampos p = f.tellg();
+        char b[4];
+        if (!f.read(b, 4)) {
+            f.clear();
+            f.seekg(p);
+            return "";
+        }
+        f.clear();
+        f.seekg(p);
+
+        // Fourcc codes are character-based, so we don't need endian conversion
+        return std::string(b, 4);
     }
 
     bool peek_four(std::streampos at, std::string& out) {
         if (at < 0) return false;
         std::streampos p = n3file.tellg();
-        n3file.clear(); n3file.seekg(at);
-        uint32_t v; if (!n3file.read(reinterpret_cast<char*>(&v), sizeof(v))) { n3file.clear(); n3file.seekg(p); return false; }
+        n3file.clear();
+        n3file.seekg(at);
+
         char b[4];
-        if (byteorder == "little") { b[0] = v & 0xFF; b[1] = (v >> 8) & 0xFF; b[2] = (v >> 16) & 0xFF; b[3] = (v >> 24) & 0xFF; }
-        else { b[3] = v & 0xFF; b[2] = (v >> 8) & 0xFF; b[1] = (v >> 16) & 0xFF; b[0] = (v >> 24) & 0xFF; }
+        if (!n3file.read(b, 4)) {
+            n3file.clear();
+            n3file.seekg(p);
+            return false;
+        }
         out.assign(b, 4);
-        n3file.clear(); n3file.seekg(p);
+        n3file.clear();
+        n3file.seekg(p);
         return true;
+    }
+    bool resync_to_valid(std::size_t maxScan = 1 << 20) {
+        std::streampos start = n3file.tellg();
+        for (std::size_t i = 0; i < maxScan && n3file.good(); ++i) {
+            std::string t; std::streampos pos = start + static_cast<std::streamoff>(i);
+            if (!peek_four(pos, t)) break;
+            if (ValidFourCC().count(t)) {
+                n3file.clear();
+                n3file.seekg(pos);
+                return true;
+            }
+        }
+        n3file.clear();
+        n3file.seekg(start);
+        return false;
+    }
+    bool is_valid_here() {
+        std::string t; std::streampos p = n3file.tellg();
+        if (!peek_four(p, t)) return false;
+        return ValidFourCC().count(t) != 0;
     }
 
     bool looks_allowed(const std::string& t) {
@@ -502,18 +693,20 @@ private:
         return true;
     }
 
+
     bool is_known_here() {
         std::string t; std::streampos p = n3file.tellg();
         if (!peek_four(p, t)) return false;
-        return Known.count(t) > 0;
+        return looks_allowed(t);
     }
+
 
     bool resync(std::size_t maxScan = 1 << 20) {
         std::streampos start = n3file.tellg();
         for (std::size_t i = 0; i < maxScan && n3file.good(); ++i) {
             std::string t; std::streampos pos = start + static_cast<std::streamoff>(i);
             if (!peek_four(pos, t)) break;
-            if (Known.count(t)) { n3file.clear(); n3file.seekg(pos); return true; }
+            if (looks_allowed(t)) { n3file.clear(); n3file.seekg(pos); return true; }
         }
         n3file.clear(); n3file.seekg(start); return false;
     }
@@ -522,9 +715,11 @@ private:
         std::streampos p = n3file.tellg();
         n3file.seekg(static_cast<std::streamoff>(n), std::ios::cur);
         if (!n3file.good()) { n3file.clear(); n3file.seekg(p); return false; }
-        if (is_known_here()) return true;
-        n3file.clear(); n3file.seekg(p); return false;
+        if (is_valid_here()) return true;
+        n3file.clear(); n3file.seekg(p);
+        return false;
     }
+
 
     bool skip_envelope() { for (int i = 0; i < 8; i++) (void)read_n3_value<float>(); (void)read_n3_value<int32_t>(); return true; }
     void skip_floats(int n) { for (int i = 0; i < n; i++) (void)read_n3_value<float>(); }
@@ -532,49 +727,44 @@ private:
 
     bool generic_skip() {
         std::streampos p = n3file.tellg();
+        if (p == std::streampos(-1)) return false;
 
-        int32_t sz = 0;
         {
             std::streampos q = n3file.tellg();
-            sz = read_n3_value<int32_t>();
-            if (sz > 0 && sz < 10000000 && try_skip_bytes(sz)) return true;
-            n3file.clear(); n3file.seekg(q);
-        }
-        {
-            std::streampos q = n3file.tellg();
-            uint16_t L = read_n3_value<uint16_t>();
-            if (L < 65535 && try_skip_bytes(L)) return true;
-            n3file.clear(); n3file.seekg(q);
-        }
-        {
-            std::streampos q = n3file.tellg();
-            uint16_t L1 = read_n3_value<uint16_t>(); n3file.seekg(L1, std::ios::cur);
-            uint16_t L2 = read_n3_value<uint16_t>(); n3file.seekg(L2, std::ios::cur);
-            if (n3file.good() && is_known_here()) return true;
-            n3file.clear(); n3file.seekg(q);
-        }
-        {
-            std::streampos q = n3file.tellg();
-            int32_t n = read_n3_value<int32_t>();
-            if (n >= 0 && n < 4096) {
-                bool ok = true; for (int i = 0; i < n; i++) { if (!try_skip_bytes(read_n3_value<uint16_t>())) { ok = false; break; } }
-                if (ok && is_known_here()) return true;
+            int32_t sz = read_n3_value<int32_t>();
+            if (sz > 0 && sz < 10'000'000) {
+                n3file.seekg(static_cast<std::streamoff>(sz), std::ios::cur);
+                if (n3file.good() && is_valid_here()) return true;
             }
             n3file.clear(); n3file.seekg(q);
         }
+
         {
             std::streampos q = n3file.tellg();
-            int32_t n = read_n3_value<int32_t>();
-            if (n >= 0 && n < 1'000'000 && try_skip_bytes(static_cast<std::size_t>(n) * sizeof(float))) return true;
+            uint16_t L = read_n3_value<uint16_t>();
+            if (L < 65535) {
+                n3file.seekg(L, std::ios::cur);
+                if (n3file.good() && is_valid_here()) return true;
+            }
             n3file.clear(); n3file.seekg(q);
         }
+
         {
-            n3file.clear(); n3file.seekg(p);
-            if (resync()) return true;
+            std::streampos q = n3file.tellg();
+            auto rd = [&](uint16_t& L) {
+                L = read_n3_value<uint16_t>();
+                n3file.seekg(L, std::ios::cur);
+                };
+            uint16_t L1 = 0, L2 = 0;
+            rd(L1); rd(L2);
+            if (n3file.good() && is_valid_here()) return true;
+            n3file.clear(); n3file.seekg(q);
         }
+
         n3file.clear(); n3file.seekg(p);
-        return false;
+        return resync_to_valid();
     }
+
 public:
 
     int currentSlot = 0;
@@ -594,17 +784,6 @@ public:
         return 0;
     }
 
-    std::string read_n3_fourcc() {
-        uint32_t v; n3file.read(reinterpret_cast<char*>(&v), sizeof(v));
-        char b[4];
-        if (byteorder == "little") { b[0] = v & 0xFF; b[1] = (v >> 8) & 0xFF; b[2] = (v >> 16) & 0xFF; b[3] = (v >> 24) & 0xFF; }
-        else { b[3] = v & 0xFF; b[2] = (v >> 8) & 0xFF; b[1] = (v >> 16) & 0xFF; b[0] = (v >> 24) & 0xFF; }
-        std::string t(b, 4);
-        for (char c : t) if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '<' || c == '>' || c == '_'))
-            throw std::runtime_error("Invalid fourcc '" + t + "' at offset " + std::to_string((int)n3file.tellg() - 4));
-        return t;
-    }
-
     bool parse_tag_shape(const std::string& t, std::shared_ptr<Node>& node) {
         if (t == "MESH") { node->mesh_resource_id = read_n3_string(); std::cout << "        mesh_res_id=" << node->mesh_resource_id << std::endl; return true; }
         if (t == "PGRI") {                           // <-- НОВО
@@ -615,6 +794,25 @@ public:
         return false;
     }
 
+    void parse_NJNT_block() {
+        int32_t num = read_n3_value<int32_t>();
+        if (num < 0 || num > 100000) throw std::runtime_error("NJNT count");
+        for (int32_t k = 0; k < num; ++k) {
+            std::string nm = read_n3_string();
+            std::string tag = read_n3_fourcc();
+            if (tag != "TNOJ") throw std::runtime_error("TNOJ");
+            uint32_t ji = read_n3_value<uint32_t>();
+            int32_t  pi = read_n3_value<int32_t>();
+            float t0 = read_n3_value<float>(); float t1 = read_n3_value<float>(); float t2 = read_n3_value<float>();
+            float q0 = read_n3_value<float>(); float q1 = read_n3_value<float>(); float q2 = read_n3_value<float>(); float q3 = read_n3_value<float>();
+            float s0 = read_n3_value<float>(); float s1 = read_n3_value<float>(); float s2 = read_n3_value<float>();
+            (void)nm; (void)ji; (void)pi; (void)t0; (void)t1; (void)t2; (void)q0; (void)q1; (void)q2; (void)q3; (void)s0; (void)s1; (void)s2;
+        }
+    }
+
+
+    // NEBULA DEVICE BACKEND
+    // -- characterskin;characterskinnode
     bool skip4cc(const std::string& t, std::shared_ptr<Node>& node) {
         auto skipJoint = [&](int f) {
             (void)read_n3_value<int32_t>();
@@ -624,25 +822,107 @@ public:
             return true;
             };
 
-        if (t == "NSKL") { (void)read_n3_value<int32_t>(); return true; }
+        if (t == "NSKL") {
+            // NumSkinLists - just a count
+            int32_t numSkinLists = read_n3_value<int32_t>();
+            std::cout << "NSKL: numSkinLists=" << numSkinLists << std::endl;
+            return true;
+        }
+        else if (t == "LNKS") {
+            std::string skinListName = read_n3_string();
+            int32_t numSkins = read_n3_value<int32_t>();
+            std::cout << "LNKS: " << skinListName << " numSkins=" << numSkins << std::endl;
+            for (int j = 0; j < numSkins; j++) {
+                std::string skinName = read_n3_string();
+                std::cout << "  skin[" << j << "]=" << skinName << std::endl;
+            }
+            // padding fix
+            std::streampos before = n3file.tellg();
+            std::string next = peek_fourcc(n3file, byteorder);
+            if (!looks_like_tag(next)) (void)read_n3_value<uint8_t>();
+            else { n3file.clear(); n3file.seekg(before); }
+            return true;
+        }
+        else if (t == "CHSN") {
+            node->node_type = "CHSN";
+            return true;
+        }
+
+      
         else if (t == "SKNL") {
-            (void)read_n3_string();
-            int32_t num = read_n3_value<int32_t>();
-            for (int i = 0; i < num; i++) (void)read_n3_string();
+            std::string skinListName = read_n3_string();
+            int32_t numSkins = read_n3_value<int32_t>();
+            std::cout << "SKNL: name=" << skinListName << " numSkins=" << numSkins << std::endl;
+
+            for (int i = 0; i < numSkins && i < 1000; i++) { 
+                std::string skinName = read_n3_string();
+                std::cout << "  skin[" << i << "]: " << skinName << std::endl;
+            }
+
             if (n3version >= 2) {
                 std::streampos before = n3file.tellg();
                 auto next = peek_fourcc(n3file, byteorder);
-                if (!looks_like_tag(next)) { (void)read_n3_value<uint8_t>(); (void)read_n3_string(); }
-                else { n3file.clear(); n3file.seekg(before); }
+                if (!looks_like_tag(next)) {
+                    (void)read_n3_value<uint8_t>();
+                    (void)read_n3_string();
+                }
+                else {
+                    n3file.clear();
+                    n3file.seekg(before);
+                }
             }
             return true;
         }
-        else if (t == "ANIM" || t == "MINA" || t == "VART" || t == "TRAV") { (void)read_n3_string(); return true; }
-        else if (t == "NJNT" || t == "NJMS" || t == "TNJN") { (void)read_n3_value<int32_t>(); return true; }
+        else if (t == "NJNT") {
+            parse_NJNT_block();
+            return true;
+        }
+        else if (t == "JONT") {
+            int32_t jointIndex = read_n3_value<int32_t>();
+            int32_t parentJointIndex = read_n3_value<int32_t>();
+
+            float poseTranslation[4];
+            for (int i = 0; i < 4; i++) {
+                poseTranslation[i] = read_n3_value<float>();
+            }
+
+            float poseRotation[4];
+            for (int i = 0; i < 4; i++) {
+                poseRotation[i] = read_n3_value<float>();
+            }
+
+            float poseScale[4];
+            for (int i = 0; i < 4; i++) {
+                poseScale[i] = read_n3_value<float>();
+            }
+
+            std::string jointName = read_n3_string();
+
+            std::cout << "JONT: idx=" << jointIndex << " parent=" << parentJointIndex
+                << " name=" << jointName << std::endl;
+            return true;
+        }
+        else if (t == "ANIM" || t == "MINA" || t == "VART" || t == "TRAV") {
+            std::string resourceId = read_n3_string();
+            std::cout << t << ": " << resourceId << std::endl;
+            return true;
+        }
+        else if (t == "NJMS" || t == "TNJN") {
+            int32_t value = read_n3_value<int32_t>();
+            std::cout << t << ": " << value << std::endl;
+            return true;
+        }
         else if (t == "BJNT") return skipJoint(0);
         else if (t == "SJNT") return skipJoint(11);
-        else if (t == "JONT") return skipJoint(12);
-        else if (t == "TNOJ" || t == "NOJT") return skipJoint(16);
+        else if (t == "TNOJ") {
+            uint32_t idx = read_n3_value<uint32_t>();
+            uint32_t parentIdx = read_n3_value<uint32_t>();
+            float m[16];
+            n3file.read(reinterpret_cast<char*>(m), sizeof(m));
+            std::cout << "TNOJ bone idx=" << idx << " parent=" << parentIdx << std::endl;
+            return true;
+        }
+
         else if (t == "CASH") { (void)read_n3_value<uint8_t>(); return true; }
         else if (t == "SHDR") { (void)read_n3_string(); return true; }
 
@@ -722,19 +1002,87 @@ public:
             return true;
         }
 
-        else if (t == "LDOM" || t == "NRHC" || t == "LKSN" || t == "LNKS" || t == "TNJN" || t == "NJNU" ||
+        else if (t == "LDOM") {
+            for (int i = 0; i < 8; i++) (void)read_n3_value<float>();
+            (void)read_n3_value<int32_t>();
+            return true;
+        }
+        else if (t == "NRHC"  || t == "TNJN" || t == "NJNU" ||
             t == "NOJA" || t == "NOJB" || t == "NOJC" || t == "NOJD" || t == "NOJE" || t == "NOJF" ||
             t == "NOJG" || t == "NOJH" || t == "NOJI" || t == "NOJJ" || t == "NOJK" || t == "NOJL" ||
             t == "NOJM" || t == "NOJN" || t == "NOJO" || t == "NOJP" || t == "NOJQ" || t == "NOJR" ||
-            t == "NOJS" || t == "NOJT" || t == "TRAV" || t == "NFRT" || t == "XOBL" || t == "NSHC" ||
-            t == "TXTS" || t == "TLFS" || t == "CEVS" || t == "HSAC" || t == "RDHS" || t == "PTNM" ||
-            t == "HSEM" || t == "SEMS" || t == "IRGP" || t == "FKSN" || t == "GRFS") {
+            t == "NOJS" || t == "NOJT" || t == "TRAV" || t == "NFRT" || t == "XOBL" || t == "NSHC") {
             for (int i = 0; i < 8; i++) (void)read_n3_value<float>();
             (void)read_n3_value<int32_t>();
             return true;
         }
 
+        else if (t == "LKSN") {
+            int32_t numSkinLists = read_n3_value<int32_t>();
+            std::cout << "LKSN: numSkinLists=" << numSkinLists << std::endl;
+            return true;
+            }
+        else if (t == "TXTS") {
+            std::string key = read_n3_string();
+            std::string val = read_n3_string();
+            node->shader_textures[key] = val;
+            return true;
+        }
+        else if (t == "TLFS") {
+            std::string name = read_n3_string();
+            float v = read_n3_value<float>();
+            node->shader_parameters[name] = v;
+            return true;
+        }
+        else if (t == "CEVS") {
+            std::string name = read_n3_string();
+            read_n3_value<float>();
+            read_n3_value<float>();
+            read_n3_value<float>();
+            read_n3_value<float>();
+            return true;
+
+        }
+        else if (t == "HSEM") {
+            std::string mesh_res_id = read_n3_string();
+            node->mesh_resource_id = mesh_res_id;
+            std::cout << "MESH: " << mesh_res_id << std::endl;
+            return true;
+            }
+
+        else if (t == "HSAC") {
+            (void)read_n3_value<uint8_t>();
+            return true;
+        }
+
         else if (t == "EDFR") { return true; }
+        else if (t == "RDHS" || t == "PTNM" || t == "SEMS") {
+            (void)read_n3_string();
+            return true;
+        }
+        else if (t == "IRGP") {
+            (void)read_n3_value<uint32_t>();
+            return true;
+        }
+        else if (t == "FKSN") {
+            (void)read_n3_value<uint32_t>();
+            return true;
+        }
+        else if (t == "GRFS") {
+            uint32_t a0 = read_n3_value<uint32_t>();
+            uint32_t n = read_n3_value<uint32_t>();
+            if (n > 0 && n < 10000) {
+                for (uint32_t i = 0; i < n; ++i) (void)read_n3_value<uint32_t>();
+            }
+            else {
+                while (n3file.good()) {
+                    std::string next = peek_fourcc(n3file, byteorder);
+                    if (looks_like_tag(next)) break;
+                    (void)read_n3_value<uint32_t>();
+                }
+            }
+            return true;
+        }
 
         return false;
     }
@@ -784,14 +1132,19 @@ public:
 public:
     bool parse_file(const std::string& path) {
         n3file.open(path, std::ios::binary);
-        if (!n3file.is_open()) { report("ERROR", "Could not open file: " + path); return false; }
+        if (!n3file.is_open()) {
+            report("ERROR", "Could not open file: " + path);
+            return false;
+        }
 
-        char hdr[4]; n3file.read(hdr, 4); std::string h(hdr, 4);
+        char hdr[4];
+        n3file.read(hdr, 4);
+        std::string h(hdr, 4);
+
         if (h == "NEB3") byteorder = "little";
         else if (h == "3BEN") byteorder = "big";
-        else { report("ERROR", "Invalid file, unknown fourCC '" + h + "'"); return false; }
 
-        uint32_t ver; n3file.read(reinterpret_cast<char*>(&ver), sizeof(ver));
+        uint32_t ver = read_n3_value<uint32_t>();
         std::cout << "n3 Version: " << ver << std::endl;
         n3version = ver;
 
@@ -800,49 +1153,94 @@ public:
         std::vector<std::shared_ptr<Node>> stack;
 
         while (!done && n3file.good()) {
+            std::streampos pos_before = n3file.tellg();
             std::string tag;
-            try { tag = read_n3_fourcc(); }
-            catch (std::runtime_error&) { if (resync()) continue; break; }
+            try {
+                tag = read_n3_fourcc();
+                std::cout << "Position: 0x" << std::hex << pos_before << std::dec
+                    << ", Tag: '" << tag << "'" << std::endl;
+            }
+            catch (std::runtime_error& e) {
+                std::cout << "Exception at position 0x" << std::hex << pos_before << std::dec
+                    << ": " << e.what() << std::endl;
+                if (resync_to_valid()) continue;
+                break;
+            }
 
-            if (tag == ">MDL") {
+            if (ValidFourCC().count(tag) == 0) {
+                std::cout << "Non-FourCC or garbage '" << tag << "' at 0x"
+                    << std::hex << pos_before << std::dec << " -> trying to skip/resync\n";
+
+                n3file.clear();
+                n3file.seekg(pos_before);
+                if (generic_skip()) continue;
+                if (resync_to_valid()) continue;
+                report("ERROR", "Cannot resync at position 0x" +
+                    std::to_string(static_cast<long long>(pos_before)));
+                break;
+            }
+
+            if (tag == "LDM>") {
                 n3modeltype = read_n3_fourcc();
                 n3modelname = read_n3_string();
-                std::cout << ">MDL\n";
-                std::cout << "model_type_4cc: '" << n3modeltype << "'\n";
-                std::cout << "model_name: '" << n3modelname << "'\n";
+                std::cout << "LDM> fourcc: '" << n3modeltype << "'" << std::endl;
+                std::cout << "LDM> name: '" << n3modelname << "'" << std::endl;
+
+                auto n = std::make_shared<Node>();
+                n->node_type = n3modeltype;
+                n->node_name = n3modelname;
+                n->node_parent = nullptr;
+                n3node_list.push_back(n);
+                current = n;
+                stack.push_back(n);
+                currentSlot = 0;
             }
-            else if (tag == "<MDL") { done = true; current = nullptr; }
-            else if (tag == ">MND") {
+            else if (tag == "<LDM") {
+                done = true;
+                current = nullptr;
+            }
+            else if (tag == "DNM>") {
                 std::string node4 = read_n3_fourcc();
                 std::string nodeName = read_n3_string();
+
                 auto n = std::make_shared<Node>();
                 n->node_name = nodeName;
                 n->node_type = node4;
                 n->node_parent = current;
-                std::cout << ">MND " << n->node_type << " - " << n->node_name << "\n";
+                std::cout << "DNM> " << n->node_type << " - " << n->node_name << std::endl;
                 if (current) current->node_children.push_back(n);
                 n3node_list.push_back(n);
                 current = n;
                 stack.push_back(n);
                 currentSlot = 0;
             }
-            else if (tag == "<MND") {
+            else if (tag == "<DNM") {
                 if (!stack.empty()) stack.pop_back();
                 current = stack.empty() ? nullptr : stack.back();
             }
-            else if (tag == "EOF_") { done = true; current = nullptr; }
+            else if (tag == "EOF_" || tag == "_FOE") {
+                done = true;
+                break;
+            }
             else {
-                if (!current) { report("ERROR", "Tag without active node: " + tag); return false; }
+                if (!current) {
+                    report("ERROR", "Tag without active node: " + tag);
+                    return false;
+                }
                 if (!parse_tag_shape(tag, current) &&
                     !parse_tag_state(tag, current) &&
                     !parse_tag_transform(tag, current) &&
                     !skip4cc(tag, current)) {
                     if (!generic_skip()) {
-                        report("ERROR", "Unknown tag '" + tag + "'");
+                        report("ERROR", "Unknown tag '" + tag + "' at position 0x" +
+                            std::to_string(static_cast<long long>(pos_before)));
                         return false;
                     }
                 }
             }
+
+            std::streampos pos_after = n3file.tellg();
+            std::cout << "After processing, position: 0x" << std::hex << pos_after << std::dec << std::endl;
         }
 
         n3file.close();
@@ -1014,7 +1412,7 @@ void framebuffer_size_callback(GLFWwindow* window, int width, int height)
 }
 
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
-    distance -= yoffset * 0.5f;
+    distance -= static_cast<float>(yoffset) * 0.5f;
     if (distance < 1.0f) distance = 1.0f;
     if (distance > 50.0f) distance = 50.0f;
 }
@@ -1028,30 +1426,6 @@ float gridVertices[] = {
      5.0f, 0.0f, -5.0f,
      5.0f, 0.0f,  5.0f,
     -5.0f, 0.0f,  5.0f
-};
-
-
-
-struct ObjVertex { float px, py, pz; float nx, ny, nz; float tx, ty, tz; float bx, by, bz; float u0, v0; float u1, v1; float cr, cg, cb, ca; float w0, w1, w2, w3; uint8_t j0, j1, j2, j3; };
-
-struct Nvx2Group {
-    uint32_t firstVertex = 0;
-    uint32_t numVertices = 0;
-    uint32_t firstTriangle = 0;
-    uint32_t numTriangles = 0;
-    uint32_t firstEdge = 0;
-    uint32_t numEdges = 0;
-
-    uint32_t firstIndex()   const { return firstTriangle * 3; }
-    uint32_t indexCount()   const { return numTriangles * 3; }
-    uint32_t baseVertex()   const { return firstVertex; }
-};
-
-struct Mesh {
-    std::vector<ObjVertex> verts;
-    std::vector<uint32_t> idx;
-    std::vector<Nvx2Group> groups;
-    GLuint vao = 0, vbo = 0, ebo = 0;
 };
 
 enum VertexComponent {
@@ -1161,7 +1535,7 @@ static inline float fps2float(int16_t s) {
     return static_cast<float>(s) / 8191.0f;
 }
 
-
+/*
 bool LoadNVX2_AndNormalizeUnit(const std::string& path, Mesh& out) {
     std::cout << "[NVX2] open: " << path << "\n";
     std::ifstream f(path, std::ios::binary);
@@ -1407,6 +1781,181 @@ bool LoadNVX2_AndNormalizeUnit(const std::string& path, Mesh& out) {
 
     return true;
 }
+*/
+
+bool LoadNVX2(const std::string& path, Mesh& out) {
+    const float px = 0.0f, py = 0.0f, pz = 0.0f;
+    const float rx = 0.0f, ry = 0.0f, rz = 0.0f;
+    const float sx = 1.0f, sy = 1.0f, sz = 1.0f;
+
+    std::cout << "[NVX2] open: " << path << "\n";
+    std::ifstream f(path, std::ios::binary);
+    if (!f) { std::cerr << "[NVX2] cannot open\n"; return false; }
+
+    char magicChars[4] = { 0,0,0,0 };
+    f.read(magicChars, 4);
+    if (!f) { std::cerr << "[NVX2] failed reading magic\n"; return false; }
+    std::string magicStr(magicChars, 4);
+    std::cout << "[NVX2] magic: '" << magicStr << "' ("
+        << std::hex << std::showbase
+        << (int)(unsigned char)magicChars[0] << " "
+        << (int)(unsigned char)magicChars[1] << " "
+        << (int)(unsigned char)magicChars[2] << " "
+        << (int)(unsigned char)magicChars[3] << std::dec << ")\n";
+
+    uint32_t numGroups, numVertices, vertexWidthFloats, numTrianglesOrIndices, numEdges, compMask;
+    f.read((char*)&numGroups, 4);
+    f.read((char*)&numVertices, 4);
+    f.read((char*)&vertexWidthFloats, 4);
+    f.read((char*)&numTrianglesOrIndices, 4);
+    f.read((char*)&numEdges, 4);
+    f.read((char*)&compMask, 4);
+
+    out.groups.clear();
+    out.groups.resize(numGroups);
+    if (numGroups > 0) {
+        f.read((char*)out.groups.data(), numGroups * sizeof(Nvx2Group));
+        if (!f) return false;
+    }
+
+    const uint32_t strideBytesHeader = vertexWidthFloats * 4;
+
+    std::unordered_map<uint32_t, int> offsets;
+    int currentOffset = 0;
+    auto addIf = [&](uint32_t comp) {
+        if (compMask & comp) {
+            offsets[comp] = currentOffset;
+            currentOffset += GetComponentSize(comp);
+        }
+        };
+
+    addIf(Coord); addIf(Normal); addIf(NormalUB4N);
+    addIf(Uv0); addIf(Uv0S2); addIf(Uv1); addIf(Uv1S2);
+    addIf(Uv2); addIf(Uv2S2); addIf(Uv3); addIf(Uv3S2);
+    addIf(Color); addIf(ColorUB4N);
+    addIf(Tangent); addIf(TangentUB4N);
+    addIf(Binormal); addIf(BinormalUB4N);
+    addIf(Weights); addIf(WeightsUB4N);
+    addIf(JIndices); addIf(JIndicesUB4);
+
+    std::vector<uint8_t> vbuf(size_t(numVertices) * size_t(strideBytesHeader));
+    if (!vbuf.empty()) {
+        f.read((char*)vbuf.data(), vbuf.size());
+        if (!f) return false;
+    }
+
+    out.verts.clear();
+    out.verts.resize(numVertices);
+
+    float cx = cosf(rx), sx_r = sinf(rx);
+    float cy = cosf(ry), sy_r = sinf(ry);
+    float cz = cosf(rz), sz_r = sinf(rz);
+
+    for (uint32_t i = 0; i < numVertices; i++) {
+        const uint8_t* base = vbuf.data() + size_t(i) * size_t(strideBytesHeader);
+        ObjVertex v{};
+        v.nz = 1.0f; v.cr = v.cg = v.cb = v.ca = 1.0f; v.w0 = 1.0f;
+
+        if (offsets.count(Coord)) {
+            const float* p = (const float*)(base + offsets[Coord]);
+            float x = p[0] * sx, y = p[1] * sy, z = p[2] * sz;
+
+            float x1 = x, y1 = y * cy - z * sy_r, z1 = y * sy_r + z * cy;
+            float x2 = x1 * cx + z1 * sx_r, y2 = y1, z2 = -x1 * sx_r + z1 * cx;
+            v.px = x2 * cz - y2 * sz_r + px;
+            v.py = x2 * sz_r + y2 * cz + py;
+            v.pz = z2 + pz;
+        }
+
+        if (offsets.count(Normal)) {
+            const float* n = (const float*)(base + offsets[Normal]);
+            v.nx = n[0]; v.ny = n[1]; v.nz = n[2];
+        }
+
+        if (offsets.count(Tangent)) {
+            const float* t = (const float*)(base + offsets[Tangent]);
+            v.tx = t[0]; v.ty = t[1]; v.tz = t[2];
+        }
+        else if (offsets.count(TangentUB4N)) {
+            const uint8_t* t = base + offsets[TangentUB4N];
+            v.tx = ub_to_n11(t[0]); v.ty = ub_to_n11(t[1]); v.tz = ub_to_n11(t[2]);
+        }
+
+        if (offsets.count(Binormal)) {
+            const float* b = (const float*)(base + offsets[Binormal]);
+            v.bx = b[0]; v.by = b[1]; v.bz = b[2];
+        }
+        else if (offsets.count(BinormalUB4N)) {
+            const uint8_t* b = base + offsets[BinormalUB4N];
+            v.bx = ub_to_n11(b[0]); v.by = ub_to_n11(b[1]); v.bz = ub_to_n11(b[2]);
+        }
+
+        if (offsets.count(Uv0)) {
+            const float* u = (const float*)(base + offsets[Uv0]);
+            v.u0 = u[0]; v.v0 = u[1];
+        }
+        if (offsets.count(Uv0S2)) {
+            const int16_t* u = (const int16_t*)(base + offsets[Uv0S2]);
+            v.u0 = fps2float(u[0]); v.v0 = fps2float(u[1]);
+        }
+
+        if (offsets.count(Uv1)) {
+            const float* u = (const float*)(base + offsets[Uv1]);
+            v.u1 = u[0]; v.v1 = 1.0f - u[1];
+        }
+        if (offsets.count(Uv1S2)) {
+            const int16_t* u = (const int16_t*)(base + offsets[Uv1S2]);
+            v.u1 = fps2float(u[0]); v.v1 = fps2float(u[1]);
+        }
+
+        if (offsets.count(Color)) {
+            const float* c = (const float*)(base + offsets[Color]);
+            v.cr = c[0]; v.cg = c[1]; v.cb = c[2]; v.ca = c[3];
+        }
+        else if (offsets.count(ColorUB4N)) {
+            const uint8_t* c = base + offsets[ColorUB4N];
+            v.cr = ub_to_u01(c[0]); v.cg = ub_to_u01(c[1]); v.cb = ub_to_u01(c[2]); v.ca = ub_to_u01(c[3]);
+        }
+
+        if (offsets.count(Weights)) {
+            const float* w = (const float*)(base + offsets[Weights]);
+            v.w0 = w[0]; v.w1 = w[1]; v.w2 = w[2]; v.w3 = w[3];
+        }
+        else if (offsets.count(WeightsUB4N)) {
+            const uint8_t* w = (base + offsets[WeightsUB4N]);
+            v.w0 = ub_to_u01(w[0]); v.w1 = ub_to_u01(w[1]); v.w2 = ub_to_u01(w[2]); v.w3 = ub_to_u01(w[3]);
+            float s = v.w0 + v.w1 + v.w2 + v.w3;
+            if (s > 0) { float inv = 1.0f / s; v.w0 *= inv; v.w1 *= inv; v.w2 *= inv; v.w3 *= inv; }
+        }
+
+        if (offsets.count(JIndices)) {
+            const float* jf = (const float*)(base + offsets[JIndices]);
+            v.j0 = (uint8_t)jf[0]; v.j1 = (uint8_t)jf[1]; v.j2 = (uint8_t)jf[2]; v.j3 = (uint8_t)jf[3];
+        }
+        else if (offsets.count(JIndicesUB4)) {
+            const uint8_t* jb = (base + offsets[JIndicesUB4]);
+            v.j0 = jb[0]; v.j1 = jb[1]; v.j2 = jb[2]; v.j3 = jb[3];
+        }
+
+        out.verts[i] = v;
+    }
+
+    uint32_t totalTris = 0;
+    for (auto& g : out.groups) totalTris += g.numTriangles;
+    uint32_t expectedIndexCount = totalTris ? totalTris * 3 : numTrianglesOrIndices;
+
+    out.idx.clear();
+    if (expectedIndexCount > 0) {
+        std::vector<uint16_t> tmp(expectedIndexCount);
+        f.read((char*)tmp.data(), expectedIndexCount * sizeof(uint16_t));
+        if (!f) return false;
+        out.idx.resize(expectedIndexCount);
+        for (uint32_t i = 0; i < expectedIndexCount; i++) out.idx[i] = tmp[i];
+    }
+
+    SetupVAO(out);
+    return true;
+}
 
 const char* vertexShaderSource = R"(
 #version 330 core
@@ -1553,49 +2102,6 @@ GLuint loadNebulaByKeys(const std::unordered_map<std::string, std::string>& m,
     return 0;
 }
 
-
-struct DrawCmd {
-    Mesh mesh;
-    GLuint tex[4];
-    bool   has[4];
-    float  worldMatrix[16];
-    int    group = -1;
-
-    float uvXform[4][4];
-    int   uvSet[4];
-
-    void applyUVTransforms(GLuint shaderProgram) {
-        for (int i = 0; i < 4; ++i) {
-            std::string uniformName = "UvXform[" + std::to_string(i) + "]";
-            GLint loc = glGetUniformLocation(shaderProgram, uniformName.c_str());
-            if (loc >= 0) {
-                glUniform4fv(loc, 1, uvXform[i]);
-            }
-        }
-        GLint uvSetLoc = glGetUniformLocation(shaderProgram, "UvSet[0]");
-        if (uvSetLoc >= 0) {
-            glUniform1iv(uvSetLoc, 4, uvSet);
-        }
-    }
-
-    DrawCmd() {
-        memset(tex, 0, sizeof(tex));
-        memset(has, 0, sizeof(has));
-        setIdentity(worldMatrix);
-        for (int s = 0; s < 4; ++s) {
-            uvXform[s][0] = 1.0f;
-            uvXform[s][1] = 1.0f;
-            uvXform[s][2] = 0.0f;
-            uvXform[s][3] = 0.0f;
-            uvSet[s] = 0;
-        }
-    }
-};
-
-
-
-std::vector<DrawCmd> sceneDraws;
-
 int main(int argc, char* argv[])
 {
     glfwInit();
@@ -1604,7 +2110,7 @@ int main(int argc, char* argv[])
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
     double sizeX = 1200, sizeY = 800;
-    GLFWwindow* window = glfwCreateWindow(sizeX, sizeY, "Nebula Device 3", NULL, NULL);
+    GLFWwindow* window = glfwCreateWindow(static_cast<int>(sizeX), static_cast<int>(sizeY), "SIMO'S NEB3 VIEWER", nullptr, nullptr);
     if (!window) { glfwTerminate(); return -1; }
 
     glfwMakeContextCurrent(window);
@@ -1637,7 +2143,13 @@ int main(int argc, char* argv[])
     glDeleteShader(fragmentShader);
 
     std::vector<std::string> n3Files = {
-        "C:/drasa_online/work/models/gambler.n3"
+       // "C:/drasa_online/work/models/deco_rubble_bruned_01.n3"
+        
+        "C:/drasa_online/work/models/characters/boss_varnok_the_wanderer.n3",
+        // "C:/drasa_online/work/models/deco_rubble_bruned_01.n3",
+      //  "C:/drasa_online/work/models/char_screen_stone_02.n3",
+     //   "C:/drasa_online/work/models/char_screen_stone_streaked_01.n3"
+        
     };
 
     for (auto& n3FullPath : n3Files) {
@@ -1664,7 +2176,7 @@ int main(int argc, char* argv[])
             if (meshPath.rfind("msh:", 0) == 0) meshPath = meshPath.substr(4);
             meshPath = "C:/drasa_online/work/meshes/" + meshPath;
 
-            if (!LoadNVX2_AndNormalizeUnit(meshPath, dc.mesh)) continue;
+            if (!LoadNVX2(meshPath, dc.mesh)) continue;
 
             for (int s = 0; s < 4; ++s) {
                 auto it = node->uvXformBySlot.find(s);
