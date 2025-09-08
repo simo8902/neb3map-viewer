@@ -25,8 +25,31 @@
                                            09/02/2025
     * ================================ VERSION 0.0.3 START  ============================
     * added glm and nlohmann::json libs
-    * 
-    * ================================ VERSION 0.0.3 END ===============================
+    * TIRED ASF
+    * ================================ VERSION 0.0.3 END ==============================='
+    
+    * ================================ VERSION 0.0.4 START  ============================
+    * fixed dds loading
+    * fixed some stuff
+    * added more mess
+    * json parser obviously (until I dont figure it out, I wont implement it)
+    * fixed grid
+    * TIRED ASF
+    * ================================ VERSION 0.0.4 END ==============================='
+
+
+    * ================================= TAGS TO PROCEED =================================
+    * FX -> QRFE
+    *
+    * ================================= TAGS TO PROCEED END =============================
+*/
+
+
+/*
+    BAKED TRANSFORM'S DATA
+    =====================================================================================================
+    ground_02 -> pre baked transform NVX2 and N3, dont resize! dont expect appearing as Transform in .map
+    =====================================================================================================
 */
 
 #include "glm.hpp"
@@ -35,13 +58,17 @@
 #include "json.hpp"
 using json = nlohmann::json;
 
+static const std::string MODELS_ROOT = "C:/drasa_online/work/models/";
+static const std::string MESHES_ROOT = "C:/drasa_online/work/meshes/";
+
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
 #undef APIENTRY
-
+#include <DirectXTex/DirectXTex.h>
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
+
 #include <iostream>
 #include <cmath>
 #include <vector>
@@ -52,10 +79,11 @@ using json = nlohmann::json;
 #include <direct.h>
 #include <filesystem>
 #include <array>
-#include <DirectXTex/DirectXTex.h>
 #include <random>
 #include <unordered_set>
+#include <sstream>
 
+// LOG STRUCTURES
 struct cerr_t {
     template<typename T>
     cerr_t& operator<<(const T& value) {
@@ -69,8 +97,21 @@ struct cerr_t {
     }
 };
 
-inline cerr_t errout;
+struct logout_t {
+    template<typename shit>
+    logout_t& operator<<(const shit& v) {
+        std::cout << "\033[38;2;255;255;0m" << v << "\033[0m";
+        return *this;
+    }
 
+    logout_t& operator<<(std::ostream& (*m)(std::ostream&)) {
+        std::cerr << m;
+        return *this;
+    }
+};
+
+inline cerr_t errout;
+inline logout_t logout;
 
 std::unordered_map<std::string, GLuint> gTexCache;
 GLuint gWhiteTex = 0;
@@ -91,6 +132,10 @@ T clamp(T v, T lo, T hi) {
 GLuint gridVAO = 0, gridVBO = 0;
 GLsizei gridVertexCount = 0;
 constexpr double M_PI = 3.14159265358979323846;
+unsigned int gDDSQuadVAO = 0, gDDSQuadVBO = 0, gDDSTexture = 0;
+GLuint gDDSShader = 0;
+bool gShowDDS = true;
+bool gCPrev = false;
 
 struct ObjVertex { float px, py, pz; float nx, ny, nz; float tx, ty, tz; float bx, by, bz; float u0, v0; float u1, v1; float cr, cg, cb, ca; float w0, w1, w2, w3; uint8_t j0, j1, j2, j3; };
 
@@ -123,6 +168,7 @@ void setIdentity(float* mat) {
 
 struct DrawCmd {
     Mesh mesh;
+    std::string name;
     GLuint tex[4];
     bool   has[4];
     float  worldMatrix[16];
@@ -159,7 +205,8 @@ struct DrawCmd {
     }
 };
 
-std::vector<DrawCmd> sceneDraws;
+std::vector<DrawCmd> fromNodes;
+std::vector<DrawCmd> withTransform;
 
 float targetX = 0.0f, targetY = 0.0f, targetZ = 0.0f;
 
@@ -230,19 +277,65 @@ GLuint LoadDDS(const std::string& path) {
     auto itc = gTexCache.find(path);
     if (itc != gTexCache.end()) return itc->second;
 
-    std::wstring wpath(path.begin(), path.end());
+    std::string norm = path;
+    for (auto& ch : norm) if (ch == '/') ch = '\\';
+
+    {
+        std::ifstream probe(norm, std::ios::binary);
+        if (!probe.good()) {
+            if (debug_output) errout << "[TEX ERR] Not found / unreadable: " << norm << "\n";
+            return 0;
+        }
+    }
 
     DirectX::ScratchImage image;
     DirectX::TexMetadata meta;
-    HRESULT hr = DirectX::LoadFromDDSFile(wpath.c_str(), DirectX::DDS_FLAGS_NONE, &meta, image);
+    HRESULT hr = E_FAIL;
+
+    hr = DirectX::LoadFromDDSFile(
+        std::wstring(norm.begin(), norm.end()).c_str(),
+        DirectX::DDS_FLAGS_NONE,
+        &meta, image
+    );
+
     if (FAILED(hr)) {
-        if (debug_output) errout << "[TEX ERR] Failed to load DDS: " << path << "\n";
+        hr = DirectX::LoadFromDDSFile(
+            std::wstring(norm.begin(), norm.end()).c_str(),
+            DirectX::DDS_FLAGS_LEGACY_DWORD | DirectX::DDS_FLAGS_NO_LEGACY_EXPANSION,
+            &meta, image
+        );
+    }
+
+    if (FAILED(hr)) {
+        std::ifstream f(norm, std::ios::binary | std::ios::ate);
+        if (!f) {
+            if (debug_output) errout << "[TEX ERR] Failed to open for memory load: " << norm << "\n";
+            return 0;
+        }
+        std::streamsize sz = f.tellg();
+        f.seekg(0, std::ios::beg);
+        std::vector<uint8_t> bytes(sz);
+        if (!f.read(reinterpret_cast<char*>(bytes.data()), sz)) {
+            if (debug_output) errout << "[TEX ERR] Failed to read bytes for memory load: " << norm << "\n";
+            return 0;
+        }
+        hr = DirectX::LoadFromDDSMemory(bytes.data(), bytes.size(),
+            DirectX::DDS_FLAGS_NONE, &meta, image);
+        if (FAILED(hr)) {
+            hr = DirectX::LoadFromDDSMemory(bytes.data(), bytes.size(),
+                DirectX::DDS_FLAGS_LEGACY_DWORD | DirectX::DDS_FLAGS_NO_LEGACY_EXPANSION,
+                &meta, image);
+        }
+    }
+
+    if (FAILED(hr)) {
+        if (debug_output) errout << "[TEX ERR] Failed to load DDS: " << norm << "\n";
         return 0;
     }
 
     const DirectX::Image* img = image.GetImage(0, 0, 0);
     if (!img) {
-        if (debug_output) errout << "[TEX ERR] No image data: " << path << "\n";
+        if (debug_output) errout << "[TEX ERR] No image data: " << norm << "\n";
         return 0;
     }
 
@@ -250,50 +343,52 @@ GLuint LoadDDS(const std::string& path) {
     bool isSRGB = false;
 
     switch (meta.format) {
-    case DXGI_FORMAT_BC1_UNORM:
-        glFormat = GL_COMPRESSED_RGBA_S3TC_DXT1_EXT; break;
-    case DXGI_FORMAT_BC1_UNORM_SRGB:
-        glFormat = GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT;
-        isSRGB = true; break;
-    case DXGI_FORMAT_BC2_UNORM:
-        glFormat = GL_COMPRESSED_RGBA_S3TC_DXT3_EXT; break;
-    case DXGI_FORMAT_BC2_UNORM_SRGB:
-        glFormat = GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT;
-        isSRGB = true; break;
-    case DXGI_FORMAT_BC3_UNORM:
-        glFormat = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT; break;
-    case DXGI_FORMAT_BC3_UNORM_SRGB:
-        glFormat = GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT;
-        isSRGB = true; break;
+    case DXGI_FORMAT_BC1_UNORM:        glFormat = GL_COMPRESSED_RGBA_S3TC_DXT1_EXT; break;
+    case DXGI_FORMAT_BC1_UNORM_SRGB:   glFormat = GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT; isSRGB = true; break;
+    case DXGI_FORMAT_BC2_UNORM:        glFormat = GL_COMPRESSED_RGBA_S3TC_DXT3_EXT; break;
+    case DXGI_FORMAT_BC2_UNORM_SRGB:   glFormat = GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT; isSRGB = true; break;
+    case DXGI_FORMAT_BC3_UNORM:        glFormat = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT; break;
+    case DXGI_FORMAT_BC3_UNORM_SRGB:   glFormat = GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT; isSRGB = true; break;
+
+    case DXGI_FORMAT_R8G8B8A8_UNORM:
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
     default:
+    {
         DirectX::ScratchImage conv;
-        hr = DirectX::Decompress(*img, DXGI_FORMAT_R8G8B8A8_UNORM, conv);
-        if (FAILED(hr)) {
-            if (debug_output) std::cout << "[TEX ERR] Decompress failed: " << path << "\n";
-            return 0;
+        const DirectX::Image* src = img;
+        DXGI_FORMAT want = DXGI_FORMAT_R8G8B8A8_UNORM;
+        if (meta.format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB) isSRGB = true;
+
+        if (meta.format != DXGI_FORMAT_R8G8B8A8_UNORM &&
+            meta.format != DXGI_FORMAT_R8G8B8A8_UNORM_SRGB) {
+            HRESULT hr2 = DirectX::Decompress(*img, DXGI_FORMAT_R8G8B8A8_UNORM, conv);
+            if (FAILED(hr2)) {
+                if (debug_output) errout << "[TEX ERR] Decompress failed: " << norm << "\n";
+                return 0;
+            }
+            src = conv.GetImage(0, 0, 0);
         }
-        img = conv.GetImage(0, 0, 0);
-        GLuint tex;
+
+        GLuint tex = 0;
         glGenTextures(1, &tex);
         glBindTexture(GL_TEXTURE_2D, tex);
         glTexImage2D(GL_TEXTURE_2D, 0, isSRGB ? GL_SRGB8_ALPHA8 : GL_RGBA8,
-            (GLsizei)img->width, (GLsizei)img->height,
-            0, GL_RGBA, GL_UNSIGNED_BYTE, img->pixels);
+            (GLsizei)src->width, (GLsizei)src->height,
+            0, GL_RGBA, GL_UNSIGNED_BYTE, src->pixels);
         glGenerateMipmap(GL_TEXTURE_2D);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-        GLenum wrapMode = GL_CLAMP_TO_EDGE;
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrapMode);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrapMode);
-
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
         glBindTexture(GL_TEXTURE_2D, 0);
+
         gTexCache[path] = tex;
-        if (debug_output) std::cout << "[TEX] Loaded: " << path << " -> " << tex << "\n";
+        if (debug_output) errout << "[TEX] Loaded RGBA8: " << norm << " -> " << tex << "\n";
         return tex;
     }
+    }
 
-    GLuint tex;
+    GLuint tex = 0;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
 
@@ -303,20 +398,23 @@ GLuint LoadDDS(const std::string& path) {
             (GLsizei)mip->width, (GLsizei)mip->height, 0,
             (GLsizei)mip->slicePitch, mip->pixels);
     }
-
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
         meta.mipLevels > 1 ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    bool isFaceLike = (path.find("mask") != std::string::npos || path.find("face") != std::string::npos);
+
+    bool isFaceLike = (norm.find("mask") != std::string::npos || norm.find("face") != std::string::npos);
     GLenum wrapMode = isFaceLike ? GL_CLAMP_TO_EDGE : GL_REPEAT;
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrapMode);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrapMode);
 
     glBindTexture(GL_TEXTURE_2D, 0);
+
     gTexCache[path] = tex;
-    if (debug_output) std::cout << "[TEX] Loaded: " << path << " -> " << tex << "\n";
+    if (debug_output) std::cout << "[TEX] Loaded BCn: " << norm << " -> " << tex << "\n";
     return tex;
 }
+
+
 
 struct Vec3 {
     float x, y, z;
@@ -529,6 +627,29 @@ void buildTransformMatrixColumnMajor(float* mat, const Vec3& pos, const Vec4& ro
 class Parser {
 public:
 
+    std::vector<std::shared_ptr<Node>> cleanNodes() const {
+        std::vector<std::shared_ptr<Node>> out;
+        std::unordered_set<std::string> seen;
+
+        auto hashNode = [](const Node& n) {
+            std::ostringstream oss;
+            oss << n.mesh_resource_id << "#" << n.primitive_group_idx;
+            for (int i = 0; i < 16; i++) oss << "," << n.worldMatrix[i];
+            return oss.str();
+            };
+
+        for (auto& n : n3node_list) {
+            if (n->mesh_resource_id.empty()) continue;
+            if (!n->node_children.empty()) continue;
+
+            std::string key = hashNode(*n);
+            if (seen.insert(key).second) {
+                out.push_back(n);
+            }
+        }
+        return out;
+    }
+
     template<typename T>
     T read_n3_value() {
         T v{};
@@ -543,7 +664,7 @@ public:
             "NOJN","NOJO","NOJP","NOJQ","NOJR","NOJS","NOJT",
             "TRAV","NFRT","LBOX","NSHC","TXTS","TLFS","CEVS",
             "HSAC","RDHS","PTNM","HSEM","SEMS","IRGP","FKSN",
-            "GRFS","DNM<","DNM>","LDM>","LDM<","EOF_","_FOE"
+            "GRFS", "TNIS","DNM<","DNM>","LDM>","LDM<","EOF_","_FOE"
         };
         return s;
     }
@@ -645,7 +766,6 @@ private:
         f.clear();
         f.seekg(p);
 
-        // Fourcc codes are character-based, so we don't need endian conversion
         return std::string(b, 4);
     }
 
@@ -771,7 +891,7 @@ public:
 
     Parser() {}
     const std::vector<std::shared_ptr<Node>>& getNodes() const { return n3node_list; }
-    void report(const std::string& t, const std::string& m) { std::cout << "[" << t << "] " << m << std::endl; }
+    void report(const std::string& t, const std::string& m) { errout << "[" << t << "] " << m << std::endl; }
 
     int infer_slot_from_key(const std::string& k) {
         if (!k.empty() && isdigit((unsigned char)k.back())) return k.back() - '0';
@@ -786,7 +906,7 @@ public:
 
     bool parse_tag_shape(const std::string& t, std::shared_ptr<Node>& node) {
         if (t == "MESH") { node->mesh_resource_id = read_n3_string(); std::cout << "        mesh_res_id=" << node->mesh_resource_id << std::endl; return true; }
-        if (t == "PGRI") {                           // <-- НОВО
+        if (t == "PGRI") {
             node->primitive_group_idx = read_n3_value<int32_t>();
             std::cout << "        primitive_group_idx=" << node->primitive_group_idx << std::endl;
             return true;
@@ -823,7 +943,6 @@ public:
             };
 
         if (t == "NSKL") {
-            // NumSkinLists - just a count
             int32_t numSkinLists = read_n3_value<int32_t>();
             std::cout << "NSKL: numSkinLists=" << numSkinLists << std::endl;
             return true;
@@ -836,7 +955,6 @@ public:
                 std::string skinName = read_n3_string();
                 std::cout << "  skin[" << j << "]=" << skinName << std::endl;
             }
-            // padding fix
             std::streampos before = n3file.tellg();
             std::string next = peek_fourcc(n3file, byteorder);
             if (!looks_like_tag(next)) (void)read_n3_value<uint8_t>();
@@ -902,6 +1020,7 @@ public:
                 << " name=" << jointName << std::endl;
             return true;
         }
+
         else if (t == "ANIM" || t == "MINA" || t == "VART" || t == "TRAV") {
             std::string resourceId = read_n3_string();
             std::cout << t << ": " << resourceId << std::endl;
@@ -1049,7 +1168,7 @@ public:
             std::cout << "MESH: " << mesh_res_id << std::endl;
             return true;
             }
-
+        else if (t == "TNIS" || t == "SINT") { (void)read_n3_string(); (void)read_n3_value<int32_t>(); return true; }
         else if (t == "HSAC") {
             (void)read_n3_value<uint8_t>();
             return true;
@@ -1157,8 +1276,8 @@ public:
             std::string tag;
             try {
                 tag = read_n3_fourcc();
-                std::cout << "Position: 0x" << std::hex << pos_before << std::dec
-                    << ", Tag: '" << tag << "'" << std::endl;
+              //  std::cout << "Position: 0x" << std::hex << pos_before << std::dec
+              //      << ", Tag: '" << tag << "'" << std::endl;
             }
             catch (std::runtime_error& e) {
                 std::cout << "Exception at position 0x" << std::hex << pos_before << std::dec
@@ -1168,7 +1287,7 @@ public:
             }
 
             if (ValidFourCC().count(tag) == 0) {
-                std::cout << "Non-FourCC or garbage '" << tag << "' at 0x"
+                errout << "Non-FourCC or garbage '" << tag << "' at 0x"
                     << std::hex << pos_before << std::dec << " -> trying to skip/resync\n";
 
                 n3file.clear();
@@ -1240,7 +1359,7 @@ public:
             }
 
             std::streampos pos_after = n3file.tellg();
-            std::cout << "After processing, position: 0x" << std::hex << pos_after << std::dec << std::endl;
+           // std::cout << "After processing, position: 0x" << std::hex << pos_after << std::dec << std::endl;
         }
 
         n3file.close();
@@ -1263,6 +1382,7 @@ void computeHierarchyMatrices(const std::vector<std::shared_ptr<Node>>& nodes) {
         };
     for (auto& n : nodes) if (!n->node_parent) dfs(n);
 }
+
 
 GLuint LoadNebTexSmart(const std::string& path) {
     if (path.find("system/white.dds") != std::string::npos) return gWhiteTex;
@@ -1293,6 +1413,7 @@ void bindNodeTextures(const Node& node, GLint uDiff, GLint uSpec, GLint uNorm, G
 }
 
 
+
 void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
     if (firstMouse) {
         lastX = xpos;
@@ -1308,7 +1429,7 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
     if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS) {
         glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
         yaw += (float)dx * 0.01f;
-        pitch -= (float)dy * 0.01f;  // Inverted for natural mouse movement
+        pitch -= (float)dy * 0.01f;
         pitch = clamp(pitch, -1.5f, 1.5f);
     }
     else {
@@ -1404,6 +1525,12 @@ void processInput(GLFWwindow* window)
 
     if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS) targetY -= speed;
     if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS) targetY += speed;
+
+    int cState = glfwGetKey(window, GLFW_KEY_C);
+    if (cState == GLFW_PRESS && !gCPrev) {
+        gShowDDS = !gShowDDS;
+    }
+    gCPrev = (cState == GLFW_PRESS);
 }
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height)
@@ -1478,6 +1605,8 @@ static int GetComponentSize(uint32_t comp) {
     default: return 0;
     }
 }
+
+/*
 static void RecalcNormals(Mesh& out) {
     for (auto& v : out.verts) { v.nx = v.ny = v.nz = 0.0f; }
     for (size_t i = 0; i + 2 < out.idx.size(); i += 3) {
@@ -1502,11 +1631,11 @@ static void RecalcNormals(Mesh& out) {
         if (len > 1e-6f) { v.nx /= len; v.ny /= len; v.nz /= len; }
         else { v.nx = 0; v.ny = 0; v.nz = 1; }
     }
-}
+}*/
 
 
 static inline float ub_to_n11(uint8_t b) { return (float(b) * (1.0f / 255.0f)) * 2.0f - 1.0f; } static inline float ub_to_u01(uint8_t b) { return float(b) * (1.0f / 255.0f); } static inline float s_to_n11(int16_t s) { return s < 0 ? float(s) / 32768.0f : float(s) / 32767.0f; } static inline float s_to_u01(int16_t s) { return (float(s) + 32768.0f) / 65535.0f; }
-static inline float s2_to_uv(int16_t s) { return float(s) / 8191.0f; } // matches Python fps2float
+static inline float s2_to_uv(int16_t s) { return float(s) / 8191.0f; }
 
 static inline uint32_t bit(uint32_t x) { return 1u << x; }
 
@@ -1527,6 +1656,13 @@ static void SetupVAO(Mesh& out) {
     glEnableVertexAttribArray(4); glVertexAttribIPointer(4, 4, GL_UNSIGNED_BYTE, sizeof(ObjVertex), (void*)offsetof(ObjVertex, j0));
    
     glEnableVertexAttribArray(5);
+
+    glEnableVertexAttribArray(6);
+    glVertexAttribPointer(6, 3, GL_FLOAT, GL_FALSE, sizeof(ObjVertex), (void*)offsetof(ObjVertex, tx));
+
+    glEnableVertexAttribArray(7);
+    glVertexAttribPointer(7, 3, GL_FLOAT, GL_FALSE, sizeof(ObjVertex), (void*)offsetof(ObjVertex, bx));
+
     glVertexAttribPointer(5, 2, GL_FLOAT, GL_FALSE, sizeof(ObjVertex), (void*)offsetof(ObjVertex, u1));
 
     glBindVertexArray(0);
@@ -1788,13 +1924,12 @@ bool LoadNVX2(const std::string& path, Mesh& out) {
     const float rx = 0.0f, ry = 0.0f, rz = 0.0f;
     const float sx = 1.0f, sy = 1.0f, sz = 1.0f;
 
-    std::cout << "[NVX2] open: " << path << "\n";
     std::ifstream f(path, std::ios::binary);
-    if (!f) { std::cerr << "[NVX2] cannot open\n"; return false; }
+    if (!f) { errout << "[NVX2] cannot open " << path << " "; return false; }
 
     char magicChars[4] = { 0,0,0,0 };
     f.read(magicChars, 4);
-    if (!f) { std::cerr << "[NVX2] failed reading magic\n"; return false; }
+    if (!f) { errout << "[NVX2] failed reading magic\n"; return false; }
     std::string magicStr(magicChars, 4);
     std::cout << "[NVX2] magic: '" << magicStr << "' ("
         << std::hex << std::showbase
@@ -1997,7 +2132,12 @@ uniform sampler2D BumpMap;
 uniform sampler2D EmissiveMap;
 
 uniform vec3 CameraPos;
-uniform vec3 LightDir;
+
+uniform vec3 SunDir;
+uniform vec3 SunColor;
+uniform float SunIntensity;
+uniform vec3 AmbientColor;
+
 uniform float SpecularPower;
 uniform float SpecularIntensity;
 uniform float EmissiveIntensity;
@@ -2018,14 +2158,13 @@ void main() {
     if (diffTex.a < 0.5) discard;
 
     vec3 N = normalize(vNormal);
-    if (HasBump == 1) 
-    {
+    if (HasBump == 1) {
         vec3 mapN = texture(BumpMap, pickUV(2)).xyz * 2.0 - 1.0;
         N = normalize(mix(N, mapN, 1.0));
     }
 
-    vec3 L = normalize(-LightDir);
     vec3 V = normalize(CameraPos - vPos);
+    vec3 L = normalize(-SunDir);
     vec3 H = normalize(L + V);
 
     float ndl = max(dot(N, L), 0.0);
@@ -2034,24 +2173,298 @@ void main() {
     vec3 albedo = diffTex.rgb;
     vec3 specC = (HasSpec == 1) ? texture(SpecMap, pickUV(1)).rgb : vec3(0.0);
     float spec = (ndl > 0.0) ? pow(ndh, SpecularPower) * SpecularIntensity : 0.0;
-
     vec3 emissive = texture(EmissiveMap, pickUV(3)).rgb * EmissiveIntensity;
 
-    vec3 color = 0.25 * albedo + ndl * albedo + spec * specC + emissive;
+    vec3 ambient = AmbientColor * albedo;
+    vec3 diffuse = SunColor * SunIntensity * ndl * albedo;
+    vec3 specular = SunColor * SunIntensity * spec * specC;
+
+    vec3 color = ambient + diffuse + specular + emissive;
+
     FragColor = vec4(color, diffTex.a);
+})";
+
+
+static glm::mat4 composeTRS(const glm::vec3& p, const glm::vec3& eulerDeg, const glm::vec3& s) {
+    glm::mat4 m(1.0f);
+    m = glm::translate(m, p);
+    m = glm::rotate(m, glm::radians(eulerDeg.z), glm::vec3(0, 0, 1));
+    m = glm::rotate(m, glm::radians(eulerDeg.y), glm::vec3(0, 1, 0));
+    m = glm::rotate(m, glm::radians(eulerDeg.x), glm::vec3(1, 0, 0));
+    m = glm::scale(m, s);
+    return m;
 }
 
-)";
+static void matCopy(float* dst16, const glm::mat4& m) {
+    const float* p = glm::value_ptr(m);
+    for (int i = 0; i < 16; ++i) dst16[i] = p[i];
+}
+
+static glm::mat4 matFromPtr(const float* src16) {
+    glm::mat4 m(1.0f);
+    float* p = glm::value_ptr(m);
+    for (int i = 0; i < 16; ++i) p[i] = src16[i];
+    return m;
+}
+
+static void setUvIdentity(float uv[4]) { uv[0] = 1.0f; uv[1] = 1.0f; uv[2] = 0.0f; uv[3] = 0.0f; }
+static inline void extractPos(const float* m, float& x, float& y, float& z) { x = m[12]; y = m[13]; z = m[14]; }
+
+static std::string resolvePath(const std::string& raw) {
+    if (raw.rfind("mdl::", 0) == 0) {
+        std::string p = MODELS_ROOT + raw.substr(5);
+        std::cout << "[RESOLVE] mdl:: -> " << p << "\n";
+        return p;
+    }
+    if (raw.rfind("msh::", 0) == 0) {
+        std::string p = MESHES_ROOT + raw.substr(5);
+        std::cout << "[RESOLVE] msh:: -> " << p << "\n";
+        return p;
+    }
+    if (raw.rfind("meshes:", 0) == 0) {
+        std::string p = MESHES_ROOT + raw.substr(7);
+        std::cout << "[RESOLVE] meshes: -> " << p << "\n";
+        return p;
+    }
+    std::cout << "[RESOLVE] raw -> " << raw << "\n";
+    return raw;
+}
+
+/*
+static bool AppendFromN3WithTransform(const std::string& n3Path,
+    const glm::vec3& jsonPos,
+    const glm::vec3& jsonRot,
+    const glm::vec3& jsonScale)
+{
+    size_t before = sceneDraws.size();
+    std::cout << "[N3] open " << n3Path << "\n";
+
+    Parser parser;
+    if (!parser.parse_file(n3Path)) {
+        errout << "[N3] parse fail " << n3Path << "\n";
+        return false;
+    }
+
+    for (auto& n : parser.getNodes()) n->buildLocalMatrix();
+    computeHierarchyMatrices(parser.getNodes());
+
+    int added = 0;
+    for (auto& node : parser.getNodes()) {
+        if (node->mesh_resource_id.empty()) continue;
+
+        DrawCmd dc;
+        dc.group = node->primitive_group_idx;
+
+        dc.tex[0] = loadNebTex(node->shader_textures, "DiffMap0");
+        dc.tex[1] = loadNebTex(node->shader_textures, "SpecMap0");
+        dc.tex[2] = loadNebTex(node->shader_textures, "BumpMap0");
+        dc.tex[3] = loadNebTex(node->shader_textures, "EmsvMap0");
+        for (int i = 0; i < 4; ++i) {
+            dc.has[i] = (dc.tex[i] != 0);
+            if (!dc.has[i]) {
+                if (i == 0) dc.tex[i] = gWhiteTex;
+                else dc.tex[i] = gBlackTex;
+            }
+        }
+
+        std::string meshPath = node->mesh_resource_id;
+        if (meshPath.rfind("msh:", 0) == 0) meshPath = meshPath.substr(4);
+        meshPath = MESHES_ROOT + meshPath;
+        if (!LoadNVX2(meshPath, dc.mesh)) {
+            errout << "[N3] nvx2 fail " << meshPath << "\n";
+            continue;
+        }
+
+        for (int s = 0; s < 4; ++s) {
+            dc.uvXform[s][0] = 1;
+            dc.uvXform[s][1] = 1;
+            dc.uvXform[s][2] = 0;
+            dc.uvXform[s][3] = 0;
+            dc.uvSet[s] = 0;
+        }
+
+        glm::vec3 n3Scale(node->scale.x, node->scale.y, node->scale.z);
+        glm::vec3 combinedScale(
+            jsonScale.x * n3Scale.x,
+            jsonScale.y * n3Scale.y,
+            jsonScale.z * n3Scale.z
+        );
+        glm::mat4 finalM = composeTRS(
+            jsonPos,
+            glm::vec3(node->rotation.x, node->rotation.y, node->rotation.z),
+            glm::vec3(node->scale.x, node->scale.y, node->scale.z)
+        );
+
+        matCopy(dc.worldMatrix, finalM);
+
+        float px, py, pz;
+        extractPos(dc.worldMatrix, px, py, pz);
+        errout << "[ADD N3] " << meshPath
+            << " pos(" << px << ", " << py << ", " << pz << ")"
+            << " jsonScale(" << jsonScale.x << "," << jsonScale.y << "," << jsonScale.z << ")"
+            << " n3Scale(" << n3Scale.x << "," << n3Scale.y << "," << n3Scale.z << ")"
+            << " final(" << combinedScale.x << "," << combinedScale.y << "," << combinedScale.z << ")\n";
+
+        sceneDraws.push_back(std::move(dc));
+        added++;
+    }
+
+    std::cout << "[N3] added " << added << " from " << n3Path << "\n";
+    return sceneDraws.size() > before;
+}
+*/
+
+static bool AppendFromNVX2WithTransform(const std::string& nvx2Path, const glm::mat4& rootM) {
+    std::cout << "[NVX2] open " << nvx2Path << "\n";
+
+    DrawCmd dc;
+    dc.group = -1;
+
+    if (!LoadNVX2(nvx2Path, dc.mesh)) {
+        errout << "[NVX2] load fail " << nvx2Path << "\n";
+        return false;
+    }
+
+    for (int i = 0; i < 4; ++i) {
+        dc.uvXform[i][0] = 1;
+        dc.uvXform[i][1] = 1;
+        dc.uvXform[i][2] = 0;
+        dc.uvXform[i][3] = 0;
+        dc.uvSet[i] = 0;
+    }
+
+    dc.tex[0] = gWhiteTex;
+    dc.tex[1] = gBlackTex;
+    dc.tex[2] = gFlatNormalTex;
+    dc.tex[3] = gBlackTex;
+    dc.has[0] = 1; dc.has[1] = 0; dc.has[2] = 0; dc.has[3] = 0;
+
+    matCopy(dc.worldMatrix, rootM);
+
+    float px, py, pz;
+    extractPos(dc.worldMatrix, px, py, pz);
+    std::cout << "[ADD MESH] " << nvx2Path
+        << " pos(" << px << ", " << py << ", " << pz
+        << ") Diff=" << dc.tex[0] << " Norm=" << dc.tex[2] << "\n";
+
+    withTransform.push_back(std::move(dc));
+    return true;
+}
 
 
+bool LoadSceneFromJson(const std::string& jsonFile) {
+    std::ifstream in(jsonFile);
+    if (!in) { errout << "[SCENE] open fail " << jsonFile << "\n"; return false; }
+
+    nlohmann::json j;
+    try { in >> j; }
+    catch (...) { errout << "[SCENE] json parse fail " << jsonFile << "\n"; return false; }
+    if (!j.contains("objects") || !j["objects"].is_array()) { errout << "[SCENE] no objects\n"; return false; }
+
+    size_t total = j["objects"].size();
+    std::cout << "[SCENE] objects=" << total << "\n";
+
+    int added = 0, skipped = 0, idx = 0;
+    for (auto& o : j["objects"]) {
+        idx++;
+        if (!o.contains("path")) { skipped++; continue; }
+
+        glm::vec3 jsonPos(0.0f), jsonRot(0.0f);
+        if (o.contains("pos") && o["pos"].is_array() && o["pos"].size() >= 3) {
+            jsonPos = glm::vec3(o["pos"][0].get<float>(), o["pos"][1].get<float>(), o["pos"][2].get<float>());
+        }
+        if (o.contains("rot") && o["rot"].is_array() && o["rot"].size() >= 3) {
+            jsonRot = glm::vec3(o["rot"][0].get<float>(), o["rot"][1].get<float>(), o["rot"][2].get<float>());
+        }
+        glm::mat4 Mroot = composeTRS(jsonPos, jsonRot, glm::vec3(1.0f));
+
+        std::string raw = o["path"].get<std::string>();
+        std::string resolved = resolvePath(raw);
+
+        if (raw.rfind("mdl::", 0) == 0) {
+            Parser parser;
+            if (!parser.parse_file(resolved)) { skipped++; continue; }
+
+            for (auto& node : parser.getNodes()) node->buildLocalMatrix();
+            computeHierarchyMatrices(parser.getNodes());
+
+            for (auto& node : parser.getNodes()) {
+                if (node->mesh_resource_id.empty()) continue;
+
+                DrawCmd dc;
+                dc.group = node->primitive_group_idx;
+
+                dc.tex[0] = loadNebulaByKeys(node->shader_textures, { "DiffMap0" });
+                dc.tex[1] = loadNebulaByKeys(node->shader_textures, { "SpecMap0"});
+                dc.tex[2] = loadNebulaByKeys(node->shader_textures, { "BumpMap0" });
+                dc.tex[3] = loadNebulaByKeys(node->shader_textures, { "EmsvMap0" });
+
+                for (int i = 0; i < 4; ++i) {
+                    dc.has[i] = (dc.tex[i] != 0);
+                    if (!dc.has[i]) {
+                        if (i == 0) dc.tex[i] = gWhiteTex; 
+                        else if (i == 2) dc.tex[i] = gFlatNormalTex;
+                        else dc.tex[i] = gBlackTex;
+                    }
+                }
+
+                std::string meshPath = node->mesh_resource_id;
+                if (meshPath.rfind("msh:", 0) == 0) meshPath = meshPath.substr(4);
+                meshPath = MESHES_ROOT + meshPath;
+                if (!LoadNVX2(meshPath, dc.mesh)) { errout << "[N3] nvx2 fail " << meshPath << "\n"; continue; }
+
+                for (int s = 0; s < 4; ++s) {
+                    dc.uvXform[s][0] = 1; dc.uvXform[s][1] = 1; dc.uvXform[s][2] = 0; dc.uvXform[s][3] = 0;
+                    dc.uvSet[s] = 0;
+                    auto it = node->uvXformBySlot.find(s);
+                    if (it != node->uvXformBySlot.end()) {
+                        dc.uvXform[s][0] = it->second[0];
+                        dc.uvXform[s][1] = it->second[1];
+                        dc.uvXform[s][2] = it->second[2];
+                        dc.uvXform[s][3] = it->second[3];
+                    }
+                    auto iu = node->uvSetBySlot.find(s);
+                    if (iu != node->uvSetBySlot.end()) dc.uvSet[s] = iu->second;
+                }
+
+                glm::mat4 nodeM = matFromPtr(node->worldMatrix);
+                glm::mat4 finalM = Mroot * nodeM;
+                matCopy(dc.worldMatrix, finalM);
+
+                withTransform.push_back(std::move(dc));
+                added++;
+            }
+        }
+        else if (raw.rfind("msh::", 0) == 0 || raw.rfind("meshes:", 0) == 0) {
+            glm::mat4 M = composeTRS(jsonPos, jsonRot, glm::vec3(1.0f));
+            if (AppendFromNVX2WithTransform(resolved, M)) added++; else skipped++;
+        }
+        else {
+            skipped++;
+        }
+    }
+
+    std::cout << "[SCENE] added=" << added << " skipped=" << skipped << " total=" << total << "\n";
+    return added > 0;
+}
+
+
+static void DumpSceneDraws() {
+   // std::cout << "[DUMP] sceneDraws=" << sceneDraws.size() << "\n";
+    for (size_t i = 0; i < withTransform.size(); ++i) {
+        const auto& d = withTransform[i];
+        float x, y, z; extractPos(d.worldMatrix, x, y, z);
+      //  std::cout << "[DRAW] i=" << i << " pos(" << x << ", " << y << ", " << z << ") group=" << d.group << " idxCount=" << (int)d.mesh.idx.size() << " vtxCount=" << (int)d.mesh.verts.size() << "\n";
+    }
+}
 
 const char* gridVertexShaderSource = R"(
 #version 330 core
 layout(location=0) in vec3 aPos;
-uniform mat4 model, view, projection;
-out vec3 vPos;
+uniform mat4 model;
+uniform mat4 view;
+uniform mat4 projection;
 void main() {
-    vPos = aPos;
     gl_Position = projection * view * model * vec4(aPos, 1.0);
 }
 )";
@@ -2064,6 +2477,335 @@ void main() {
     FragColor = vec4(objectColor, 1.0);
 }
 )";
+
+
+class FPSOverlay {
+public:
+    void Init(int winW, int winH) {
+        winWidth = winW;
+        winHeight = winH;
+        lastTime = glfwGetTime();
+
+        const char* vsSrc = R"(
+            #version 330 core
+            layout(location=0) in vec2 aPos;
+            uniform vec2 uResolution;
+            void main() {
+                vec2 pos = aPos / uResolution * 2.0 - 1.0;
+                gl_Position = vec4(pos.x, -pos.y, 0.0, 1.0);
+            }
+        )";
+
+        const char* fsSrc = R"(
+            #version 330 core
+            out vec4 FragColor;
+            uniform vec3 uColor;
+            void main() {
+                FragColor = vec4(uColor, 1.0);
+            }
+        )";
+
+        shader = CompileShader(vsSrc, fsSrc);
+
+        glGenVertexArrays(1, &vao);
+        glGenBuffers(1, &vbo);
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER, 4096 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindVertexArray(0);
+    }
+
+    void Update() {
+        frames++;
+        double currentTime = glfwGetTime();
+        if (currentTime - lastTime >= 1.0) {
+            snprintf(fpsText, sizeof(fpsText), "FPS:%d", frames);
+            frames = 0;
+            lastTime += 1.0;
+        }
+    }
+
+    void Render() {
+        std::vector<float> verts;
+        BuildTextVerts(fpsText, verts);
+
+        glUseProgram(shader);
+        glUniform3f(glGetUniformLocation(shader, "uColor"), 1.0f, 1.0f, 0.0f);
+        glUniform2f(glGetUniformLocation(shader, "uResolution"), (float)winWidth, (float)winHeight);
+
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, verts.size() * sizeof(float), verts.data());
+        glDrawArrays(GL_TRIANGLES, 0, verts.size() / 2);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindVertexArray(0);
+    }
+
+    void Cleanup() {
+        glDeleteProgram(shader);
+        glDeleteVertexArrays(1, &vao);
+        glDeleteBuffers(1, &vbo);
+    }
+
+private:
+    GLuint vao = 0, vbo = 0, shader = 0;
+    int winWidth = 0, winHeight = 0;
+    int frames = 0;
+    double lastTime = 0.0;
+    char fpsText[32] = "FPS:0";
+
+    GLuint CompileShader(const char* vsSrc, const char* fsSrc) {
+        GLuint vs = glCreateShader(GL_VERTEX_SHADER);
+        glShaderSource(vs, 1, &vsSrc, nullptr);
+        glCompileShader(vs);
+
+        GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
+        glShaderSource(fs, 1, &fsSrc, nullptr);
+        glCompileShader(fs);
+
+        GLuint prog = glCreateProgram();
+        glAttachShader(prog, vs);
+        glAttachShader(prog, fs);
+        glLinkProgram(prog);
+
+        glDeleteShader(vs);
+        glDeleteShader(fs);
+        return prog;
+    }
+
+    // glyph bitmaps
+    static const unsigned char font_digits[10][8];
+    static const unsigned char font_F[8];
+    static const unsigned char font_P[8];
+    static const unsigned char font_S[8];
+    static const unsigned char font_colon[8];
+
+    void BuildGlyphVerts(const unsigned char glyph[8], float x, float y, float scale, std::vector<float>& verts) {
+        for (int row = 0; row < 8; ++row) {
+            unsigned char bits = glyph[row];
+            for (int col = 0; col < 8; ++col) {
+                if (bits & (1 << (7 - col))) {
+                    float px = x + col * scale;
+                    float py = y + row * scale;
+                    float s = scale;
+                    verts.insert(verts.end(), { px,py,  px + s,py,  px + s,py + s });
+                    verts.insert(verts.end(), { px,py,  px + s,py + s,  px,py + s });
+                }
+            }
+        }
+    }
+
+    void BuildTextVerts(const char* text, std::vector<float>& verts) {
+        float x = 10, y = 10, scale = 2.0f;
+        for (const char* p = text; *p; ++p) {
+            char c = *p;
+            if (c >= '0' && c <= '9') {
+                BuildGlyphVerts(font_digits[c - '0'], x, y, scale, verts);
+                x += 8 * scale;
+            }
+            else if (c == 'F') { BuildGlyphVerts(font_F, x, y, scale, verts); x += 8 * scale; }
+            else if (c == 'P') { BuildGlyphVerts(font_P, x, y, scale, verts); x += 8 * scale; }
+            else if (c == 'S') { BuildGlyphVerts(font_S, x, y, scale, verts); x += 8 * scale; }
+            else if (c == ':') {
+                x -= 3 * scale;
+                BuildGlyphVerts(font_colon, x, y, scale, verts);
+                x += 8 * scale;
+            }
+        }
+    }
+};
+
+// glyph definitions
+const unsigned char FPSOverlay::font_digits[10][8] = {
+    {0x3C,0x66,0x6E,0x7E,0x76,0x66,0x3C,0x00},
+    {0x18,0x38,0x18,0x18,0x18,0x18,0x7E,0x00},
+    {0x3C,0x66,0x06,0x1C,0x30,0x66,0x7E,0x00},
+    {0x3C,0x66,0x06,0x1C,0x06,0x66,0x3C,0x00},
+    {0x0C,0x1C,0x3C,0x6C,0x7E,0x0C,0x0C,0x00},
+    {0x7E,0x60,0x7C,0x06,0x06,0x66,0x3C,0x00},
+    {0x1C,0x30,0x60,0x7C,0x66,0x66,0x3C,0x00},
+    {0x7E,0x66,0x0C,0x18,0x18,0x18,0x18,0x00},
+    {0x3C,0x66,0x66,0x3C,0x66,0x66,0x3C,0x00},
+    {0x3C,0x66,0x66,0x3E,0x06,0x0C,0x38,0x00}
+};
+const unsigned char FPSOverlay::font_F[8] = { 0x7E,0x60,0x60,0x7C,0x60,0x60,0x60,0x00 };
+const unsigned char FPSOverlay::font_P[8] = { 0x7C,0x66,0x66,0x7C,0x60,0x60,0x60,0x00 };
+const unsigned char FPSOverlay::font_S[8] = { 0x3C,0x60,0x60,0x3C,0x06,0x06,0x7C,0x00 };
+const unsigned char FPSOverlay::font_colon[8] = { 0x00,0x18,0x18,0x00,0x18,0x18,0x00,0x00 };
+
+std::vector<DrawCmd> BuildDrawsWithTransform(const Parser& parser,
+    const glm::vec3& pos,
+    const glm::vec3& rot,
+    const glm::vec3& scale) {
+    std::vector<DrawCmd> out;
+    glm::mat4 trs = composeTRS(pos, rot, scale);
+
+    for (auto& node : parser.getNodes()) {
+        if (node->mesh_resource_id.empty()) {
+            continue;
+        }
+
+        DrawCmd dc;
+        dc.group = node->primitive_group_idx;
+
+        glm::mat4 nodeLocal;
+        buildTransformMatrix(&nodeLocal[0][0],
+            { node->position.x, node->position.y, node->position.z },
+            { node->rotation.x, node->rotation.y, node->rotation.z, node->rotation.w },
+            { node->scale.x, node->scale.y, node->scale.z });
+        glm::mat4 finalM = trs * nodeLocal;
+        matCopy(dc.worldMatrix, finalM);
+
+        dc.tex[0] = loadNebTex(node->shader_textures, "DiffMap0");
+        dc.tex[1] = loadNebTex(node->shader_textures, "SpecMap0");
+        dc.tex[2] = loadNebTex(node->shader_textures, "BumpMap0");
+        dc.tex[3] = loadNebTex(node->shader_textures, "EmsvMap0");
+        for (int i = 0; i < 4; ++i) {
+            dc.has[i] = (dc.tex[i] != 0);
+            if (!dc.has[i]) dc.tex[i] = (i == 0) ? gWhiteTex : gBlackTex;
+        }
+
+        std::string meshPath = node->mesh_resource_id;
+        if (meshPath.rfind("msh:", 0) == 0) meshPath = meshPath.substr(4);
+        meshPath = MESHES_ROOT + meshPath;
+        if (!LoadNVX2(meshPath, dc.mesh)) {
+            continue;
+        }
+
+        dc.name = meshPath;
+
+        for (int s = 0; s < 4; ++s) {
+            dc.uvXform[s][0] = 1;
+            dc.uvXform[s][1] = 1;
+            dc.uvXform[s][2] = 0;
+            dc.uvXform[s][3] = 0;
+            dc.uvSet[s] = 0;
+        }
+        out.push_back(std::move(dc));
+    }
+    return out;
+}
+
+static inline std::string strlower(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    return s;
+}
+ 
+static bool LoadNVX2IntoScene(const std::string& path) {
+    glm::mat4 I(1.0f);
+    ensureFallbacks();
+    if (!AppendFromNVX2WithTransform(path, I)) {
+        std::cout << "[DROP] NVX2 load failed: " << path << "\n";
+        return false;
+    }
+    if (!withTransform.empty()) {
+        auto& dc = withTransform.back();
+        for (int i = 0; i < 4; i++) {
+            dc.tex[i] = gWhiteTex;
+            dc.has[i] = 1;
+        }
+        std::cout << "[DROP] NVX2 forced white textures: " << path
+            << " texIDs(" << dc.tex[0] << "," << dc.tex[1]
+            << "," << dc.tex[2] << "," << dc.tex[3] << ")\n";
+    }
+    else {
+        std::cout << "[DROP] NVX2 loaded but withTransform empty: " << path << "\n";
+    }
+    return true;
+}
+
+
+void appendN3WTransform(const std::string& path,
+    const glm::vec3& pos,
+    const glm::vec3& rot,
+    const glm::vec3& scale)
+{
+    Parser parser;
+    if (!parser.parse_file(path)) return;
+    for (auto& node : parser.getNodes()) node->buildLocalMatrix();
+    computeHierarchyMatrices(parser.getNodes());
+
+    auto draws = BuildDrawsWithTransform(parser, pos, rot, scale);
+    for (auto& dc : draws) withTransform.push_back(std::move(dc));
+}
+
+void InitDDSQuad() {
+    float size = 0.5f;
+    float quadVertices[] = {
+        -size,  size,  0.0f, 1.0f,
+        -size, -size,  0.0f, 0.0f,
+         size, -size,  1.0f, 0.0f,
+
+        -size,  size,  0.0f, 1.0f,
+         size, -size,  1.0f, 0.0f,
+         size,  size,  1.0f, 1.0f
+    };
+    glGenVertexArrays(1, &gDDSQuadVAO);
+    glGenBuffers(1, &gDDSQuadVBO);
+    glBindVertexArray(gDDSQuadVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, gDDSQuadVBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
+    glBindVertexArray(0);
+
+}
+
+void RenderDDSQuad() {
+    if (!gShowDDS || gDDSTexture == 0) return;
+    glDisable(GL_DEPTH_TEST);
+    glUseProgram(gDDSShader);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, gDDSTexture);
+    glUniform1i(glGetUniformLocation(gDDSShader, "tex"), 0);
+    glBindVertexArray(gDDSQuadVAO);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+    glEnable(GL_DEPTH_TEST);
+}
+
+static void HandleDroppedFile(const std::string& path, bool& didClear) {
+    std::string l = strlower(path);
+    if (l.size() >= 5 && l.compare(l.size() - 5, 5, ".nvx2") == 0) {
+        if (!didClear) { withTransform.clear(); didClear = true; }
+        LoadNVX2IntoScene(path);
+        return;
+    }
+    if (l.size() >= 3 && l.compare(l.size() - 3, 3, ".n3") == 0) {
+        if (!didClear) { withTransform.clear(); didClear = true; }
+        appendN3WTransform(path, { 0,0,0 }, { 0,0,0 }, { 1,1,1 });
+        return;
+    }
+    if (l.size() >= 4 && l.compare(l.size() - 4, 4, ".dds") == 0) {
+        unsigned int tex = LoadDDS(path);
+        if (tex != 0) {
+            gDDSTexture = tex;
+            if (!gShowDDS) {
+                logout << "Quad inactive, no textures visible!\n";
+            }
+            else {
+                std::cout << "[DROP] DDS fullscreen quad: " << path << " id=" << tex << "\n";
+            }
+        }
+        return;
+    }
+    std::cout << "[DROP] Unsupported: " << path << "\n";
+}
+
+static void DropCallback(GLFWwindow* window, int count, const char** paths) {
+    bool didClear = false;
+    for (int i = 0; i < count; i++) HandleDroppedFile(paths[i], didClear);
+}
+
+static void InstallDragDrop(GLFWwindow* window) {
+    glfwSetDropCallback(window, DropCallback);
+}
+
 
 static GLuint makeSolidTex(unsigned char r, unsigned char g, unsigned char b) {
     GLuint t; glGenTextures(1, &t);
@@ -2078,11 +2820,37 @@ static GLuint makeSolidTex(unsigned char r, unsigned char g, unsigned char b) {
 }
 
 void ensureFallbacks() {
-    if (!gWhiteTex)      gWhiteTex = makeSolidTex(255, 255, 255);
-    if (!gBlackTex)      gBlackTex = makeSolidTex(0, 0, 0);
-    if (!gFlatNormalTex) gFlatNormalTex = makeSolidTex(128, 128, 255);
+    if (!gWhiteTex) {
+        uint32_t whitePixel = 0xFFFFFFFF;
+        glGenTextures(1, &gWhiteTex);
+        glBindTexture(GL_TEXTURE_2D, gWhiteTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0,
+            GL_RGBA, GL_UNSIGNED_BYTE, &whitePixel);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+    if (!gBlackTex) {
+        uint32_t blackPixel = 0xFF000000;
+        glGenTextures(1, &gBlackTex);
+        glBindTexture(GL_TEXTURE_2D, gBlackTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0,
+            GL_RGBA, GL_UNSIGNED_BYTE, &blackPixel);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+    if (!gFlatNormalTex) {
+        uint32_t flatNormalPixel = 0xFF8080FF;
+        glGenTextures(1, &gFlatNormalTex);
+        glBindTexture(GL_TEXTURE_2D, gFlatNormalTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0,
+            GL_RGBA, GL_UNSIGNED_BYTE, &flatNormalPixel);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
 }
-
 
 GLuint loadNebulaByKeys(const std::unordered_map<std::string, std::string>& m,
     std::initializer_list<const char*> keys) {
@@ -2102,18 +2870,204 @@ GLuint loadNebulaByKeys(const std::unordered_map<std::string, std::string>& m,
     return 0;
 }
 
+struct InstanceTRS { glm::vec3 pos, rotDeg, scale; };
+
+
+
+struct OverrideTRS {
+    glm::vec3 pos;
+    glm::vec3 rot;
+    glm::vec3 scale;
+};
+static std::unordered_map<std::string, OverrideTRS> gOverrides = {
+    
+    { "deco_rubble_bruned_01.n3",     { { 2.220055f, 1.986336f, 2.411935f }, { 104.07255f, 80.529389f, 79.495329f }, { 1.039876442f, 1.00074181176f, 0.99903148f } } },
+    { "fx_fire_02_small.n3",          { { 1.000000f, 1.000000f, 1.000000f }, { -102.25024f, 14.796412f, 78.501279f }, { 0.0028649580f, 0.077471413f, 0.011743932f } } },
+
+    { "tile_catwalk_fence_01.n3",     { { 0.379757f, 4.234385f, 2.021405f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f } } },
+    { "tile_catwalk_fence_02.n3",     { { 0.357390f, 4.265504f, 1.971051f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f } } },
+
+    { "char_screen_stone_streaked_01.n3", { { 0.655783f, 0.314703f, 0.510550f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f } } },
+    { "char_screen_stone_02.n3",      { { 0.243499f, 0.226329f, 0.228052f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f } } },
+    { "char_screen_stone_01.n3",      { { 0.199286f, 0.206600f, 0.213412f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f } } },
+
+    { "deco_stone_plate_01.n3",       { { 1.500604f, 0.527159f, 2.023414f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f } } },
+    { "deco_stone_03.n3",             { { 0.662257f, 0.635154f, 0.933427f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f } } },
+
+    { "veg_root_01.n3",               { { 2.356448f, 0.844028f, 2.493979f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f } } },
+    { "veg_grass_03.n3",              { { 2.321698f, 0.611534f, 2.474809f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f } } },
+
+    { "fx_neferati_fog_04.n3",        { { 3.504755f, 1.000000f, 2.187984f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f } } },
+    { "fx_nebulapatch_01.n3",         { { 3.947490f, 0.000101f, 3.258760f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f } } },
+
+    { "stone_platish_01.n3",          { { 0.551777f, 0.197556f, 0.408828f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f } } }
+};
+
+
+
+static void ApplyOverride(const std::string& path, DrawCmd& dc) {
+    for (auto& [key, trs] : gOverrides) {
+        if (path.find(key) != std::string::npos) {
+            glm::mat4 m(1.0f);
+            m = glm::translate(m, trs.pos);
+            m = glm::rotate(m, glm::radians(trs.rot.x), glm::vec3(1, 0, 0));
+            m = glm::rotate(m, glm::radians(trs.rot.y), glm::vec3(0, 1, 0));
+            m = glm::rotate(m, glm::radians(trs.rot.z), glm::vec3(0, 0, 1));
+            m = glm::scale(m, trs.scale);
+            matCopy(dc.worldMatrix, m);
+            break;
+        }
+    }
+}
+
+std::vector<DrawCmd> BuildDrawsFromNodes(const Parser& parser) {
+    std::vector<DrawCmd> out;
+    for (auto& node : parser.getNodes()) {
+        if (node->mesh_resource_id.empty())
+        {
+            continue;
+        }
+
+        DrawCmd dc;
+        dc.group = node->primitive_group_idx;
+        memcpy(dc.worldMatrix, node->worldMatrix, sizeof(dc.worldMatrix));
+
+        dc.tex[0] = loadNebTex(node->shader_textures, "DiffMap0");
+        dc.tex[1] = loadNebTex(node->shader_textures, "SpecMap0");
+        dc.tex[2] = loadNebTex(node->shader_textures, "BumpMap0");
+        dc.tex[3] = loadNebTex(node->shader_textures, "EmsvMap0");
+        for (int i = 0; i < 4; ++i) {
+            dc.has[i] = (dc.tex[i] != 0);
+            if (!dc.has[i]) dc.tex[i] = (i == 0) ? gWhiteTex : gBlackTex;
+        }
+
+        std::string meshPath = node->mesh_resource_id;
+        if (meshPath.rfind("msh:", 0) == 0) meshPath = meshPath.substr(4);
+        meshPath = MESHES_ROOT + meshPath;
+        if (!LoadNVX2(meshPath, dc.mesh)) {
+
+            continue;
+        }
+
+        dc.name = meshPath;
+
+        for (int s = 0; s < 4; ++s) {
+            auto it = node->uvXformBySlot.find(s);
+            if (it != node->uvXformBySlot.end()) {
+                dc.uvXform[s][0] = it->second[0];
+                dc.uvXform[s][1] = it->second[1];
+                dc.uvXform[s][2] = it->second[2];
+                dc.uvXform[s][3] = it->second[3];
+            }
+            else {
+                dc.uvXform[s][0] = 1;
+                dc.uvXform[s][1] = 1;
+                dc.uvXform[s][2] = 0;
+                dc.uvXform[s][3] = 0;
+            }
+            auto iu = node->uvSetBySlot.find(s);
+            dc.uvSet[s] = (iu != node->uvSetBySlot.end()) ? iu->second : 0;
+        }
+        out.push_back(std::move(dc));
+    }
+    return out;
+}
+
+
+
+static const unsigned char font8x8_basic[128][8] = {
+    /* 48 '0' */
+    {0x3C,0x66,0x6E,0x7E,0x76,0x66,0x3C,0x00},
+    /* 49 '1' */
+    {0x18,0x38,0x18,0x18,0x18,0x18,0x7E,0x00},
+    /* 50 '2' */
+    {0x3C,0x66,0x06,0x1C,0x30,0x66,0x7E,0x00},
+    /* 51 '3' */
+    {0x3C,0x66,0x06,0x1C,0x06,0x66,0x3C,0x00},
+    /* 52 '4' */
+    {0x0C,0x1C,0x3C,0x6C,0x7E,0x0C,0x0C,0x00},
+    /* 53 '5' */
+    {0x7E,0x60,0x7C,0x06,0x06,0x66,0x3C,0x00},
+    /* 54 '6' */
+    {0x1C,0x30,0x60,0x7C,0x66,0x66,0x3C,0x00},
+    /* 55 '7' */
+    {0x7E,0x66,0x0C,0x18,0x18,0x18,0x18,0x00},
+    /* 56 '8' */
+    {0x3C,0x66,0x66,0x3C,0x66,0x66,0x3C,0x00},
+    /* 57 '9' */
+    {0x3C,0x66,0x66,0x3E,0x06,0x0C,0x38,0x00},
+    /* 58 ':' */
+    {0x00,0x18,0x18,0x00,0x18,0x18,0x00,0x00},
+    /* 70 'F' */
+    {0x7E,0x60,0x60,0x7C,0x60,0x60,0x60,0x00},
+    /* 80 'P' */
+    {0x7C,0x66,0x66,0x7C,0x60,0x60,0x60,0x00},
+    /* 83 'S' */
+    {0x3C,0x60,0x60,0x3C,0x06,0x06,0x7C,0x00},
+};
+
+
+void drawChar8x8(float x, float y, char c) {
+    if (c < 0 || c > 127) return;
+    glBegin(GL_QUADS);
+    for (int row = 0; row < 8; row++) {
+        unsigned char bits = font8x8_basic[(int)c][row];
+        for (int col = 0; col < 8; col++) {
+            if (bits & (1 << (7 - col))) {
+                float px = x + col * 2;
+                float py = y + row * 2;
+                glVertex2f(px, py);
+                glVertex2f(px + 2, py);
+                glVertex2f(px + 2, py + 2);
+                glVertex2f(px, py + 2);
+            }
+        }
+    }
+    glEnd();
+}
+
+void drawText8x8(float x, float y, const char* text) {
+    for (const char* p = text; *p; p++, x += 10) {
+        drawChar8x8(x, y, *p);
+    }
+}
+
+const char* quadDDSVert = R"(
+#version 330 core
+layout (location = 0) in vec2 aPos;
+layout (location = 1) in vec2 aUV;
+out vec2 vUV;
+void main(){
+    vUV = aUV;
+    gl_Position = vec4(aPos, 0.0, 1.0);
+}
+)";
+
+const char* quadDDSFrag = R"(
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+uniform sampler2D tex;
+void main(){
+    FragColor = texture(tex, vUV);
+}
+)";
+
+
 int main(int argc, char* argv[])
 {
     glfwInit();
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_ANY_PROFILE);
 
     double sizeX = 1200, sizeY = 800;
     GLFWwindow* window = glfwCreateWindow(static_cast<int>(sizeX), static_cast<int>(sizeY), "SIMO'S NEB3 VIEWER", nullptr, nullptr);
     if (!window) { glfwTerminate(); return -1; }
 
     glfwMakeContextCurrent(window);
+    glfwSwapInterval(1);
+
     glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
     glfwSetKeyCallback(window, [](GLFWwindow* w, int key, int sc, int action, int mods) {
         if (key >= 0 && key < 1024) { if (action == GLFW_PRESS) keys[key] = true; else if (action == GLFW_RELEASE) keys[key] = false; }
@@ -2123,6 +3077,8 @@ int main(int argc, char* argv[])
 
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) return -1;
     glViewport(0, 0, (int)sizeX, (int)sizeY);
+
+    InstallDragDrop(window);
 
     unsigned int vertexShader = glCreateShader(GL_VERTEX_SHADER);
     glShaderSource(vertexShader, 1, &vertexShaderSource, NULL);
@@ -2142,71 +3098,372 @@ int main(int argc, char* argv[])
     glDeleteShader(vertexShader);
     glDeleteShader(fragmentShader);
 
+    GLuint gridVS = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(gridVS, 1, &gridVertexShaderSource, NULL);
+    glCompileShader(gridVS);
+    CheckShader(gridVS, "GridVS");
+
+    GLuint gridFS = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(gridFS, 1, &gridFragmentShaderSource, NULL);
+    glCompileShader(gridFS);
+    CheckShader(gridFS, "GridFS");
+
+    GLuint gridShaderProgram = glCreateProgram();
+    glAttachShader(gridShaderProgram, gridVS);
+    glAttachShader(gridShaderProgram, gridFS);
+    glLinkProgram(gridShaderProgram);
+    CheckProgram(gridShaderProgram);
+    glDeleteShader(gridVS);
+    glDeleteShader(gridFS);
+
+    GLuint ddsVS = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(ddsVS, 1, &quadDDSVert, NULL);
+    glCompileShader(ddsVS);
+    CheckShader(ddsVS, "DDSVS");
+
+    GLuint ddsFS = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(ddsFS, 1, &quadDDSFrag, NULL);
+    glCompileShader(ddsFS);
+    CheckShader(ddsFS, "DDSFS");
+
+    GLuint ddsShaderProgram = glCreateProgram();
+    glAttachShader(ddsShaderProgram, ddsVS);
+    glAttachShader(ddsShaderProgram, ddsFS);
+    glLinkProgram(ddsShaderProgram);
+    CheckProgram(ddsShaderProgram);
+    glDeleteShader(ddsVS);
+    glDeleteShader(ddsFS);
+
+    gDDSShader = ddsShaderProgram;
+
+
+    InitGrid(10.0f, 1.0f);
+
     std::vector<std::string> n3Files = {
-       // "C:/drasa_online/work/models/deco_rubble_bruned_01.n3"
-        
-        "C:/drasa_online/work/models/characters/boss_varnok_the_wanderer.n3",
-        // "C:/drasa_online/work/models/deco_rubble_bruned_01.n3",
-      //  "C:/drasa_online/work/models/char_screen_stone_02.n3",
-     //   "C:/drasa_online/work/models/char_screen_stone_streaked_01.n3"
-        
+        /*
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_decal_ground_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_decal_ground_03.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_decal_ground_04.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_decal_ground_05.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_deco_rock_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_deco_rock_02.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_deco_rock_03.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_deco_rock_flat_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_deco_rock_flat_02.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_deco_stones_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_deco_stones_02.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_deco_stones_03.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_destroy_veg_mushroom_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_destroy_veg_mushroom_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_destroy_veg_mushroom_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_destroy_veg_mushroom_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_destroy_veg_mushroom_02.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_destroy_veg_mushroom_02.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_destroy_veg_mushroom_02.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_destroy_veg_mushroom_02.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_destroy_veg_mushroom_03.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_destroy_veg_mushroom_03.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_destroy_veg_mushroom_03.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_destroy_veg_mushroom_03.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_liquid_lava_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_liquid_lava_fall_corner_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_liquid_lava_fall_corner_01_end.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_liquid_lava_fall_corner_02.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_liquid_lava_fall_corner_02_end.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_liquid_lava_fall_corner_02_ext_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_liquid_lava_fall_corner_03.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_liquid_lava_fall_corner_03_end.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_liquid_lava_fall_corner_04.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_liquid_lava_fall_corner_04_end.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_liquid_lava_fall_corner_04_ext_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_liquid_lava_straight_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_liquid_lava_straight_01_end.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_liquid_lava_straight_01_ext_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_liquid_lava_straight_02.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_liquid_lava_straight_02_end.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_liquid_lava_straight_02_ext_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_river_fall_corner_01_ne.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_river_fall_corner_02_ne.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_river_fall_straight_02_ne.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_river_fall_straight_02_nw.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_river_fall_straight_02_sw.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_floor_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_floor_02.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_lava_bridge_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_lava_curve_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_lava_curve_01_lava.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_lava_curve_02.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_lava_curve_02_lava.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_lava_end_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_lava_end_01_lava.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_lava_fall_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_lava_fall_01_ext_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_lava_fall_01_lava.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_lava_fall_02.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_lava_fall_02_ext_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_lava_fall_02_lava.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_lava_fall_03.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_lava_fall_03_ext_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_lava_fall_03_lava.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_ramp_corner_02.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_ramp_corner_05.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_ramp_straight_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_wall_connection.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_wall_connection_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_wall_corner_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_veg_bush_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_veg_bush_01_var_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_veg_bush_02.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_veg_bush_02_var_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_veg_bush_03.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_veg_bush_04.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_veg_bush_05.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_veg_bush_06.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_veg_mushroom_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_veg_mushroom_02.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_veg_mushroom_03.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_veg_tree_pine_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_veg_tree_pine_02.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_veg_tree_pine_03.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_veg_tree_pine_04.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_veg_tree_pine_05.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_veg_tree_pine_06.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_veg_mushroom_01.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_veg_mushroom_02.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_veg_mushroom_03.n3",
+        "C:/drasa_online/work/models/m006_imperial_lava/m006_veg_zypresse_01.n3",
+
+
+       // "C:/drasa_online/work/models/m006_imperial_lava/m006_decal_ground_03.n3",
+      // "C:/drasa_online/work/models/m006_imperial_lava/m006_decal_ground_05.n3",
+       // "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_wall_straight_03_var_02.n3",
+       // "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_lava_straight_03_lava.n3",
+      //  "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ramp_rock_02_ext_01.n3",
+      //  "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_floor_03.n3",
+      //  "C:/drasa_online/work/models/m006_imperial_lava/m006_tile_ground_wall_rock_03.n3",
+
+        */
+
+        "C:/drasa_online/work/models/t000_char/background_01.n3",  
+        "C:/drasa_online/work/models/t000_char/char_screen_stone_01.n3",
+        "C:/drasa_online/work/models/t000_char/char_screen_stone_02.n3",
+        "C:/drasa_online/work/models/t000_char/char_screen_stone_streaked_01.n3",
+        "C:/drasa_online/work/models/t000_char/decal_sand_01.n3",
+        "C:/drasa_online/work/models/t000_char/deco_stone_03.n3",
+        "C:/drasa_online/work/models/t000_char/deco_stone_plate_01.n3",
+         "C:/drasa_online/work/models/m016_mountain_fortress/deco_rubble_bruned_01.n3",
+        "C:/drasa_online/work/models/t000_char/fx_lightbeam_01.n3",
+        "C:/drasa_online/work/models/t000_char/fx_nebulapatch_01.n3",
+        "C:/drasa_online/work/models/t000_char/ground_02.n3",
+        "C:/drasa_online/work/models/t000_char/stone_platish_01.n3",
+        "C:/drasa_online/work/models/t000_char/veg_grass_03.n3",
+        "C:/drasa_online/work/models/t000_char/veg_root_01.n3",
+        "C:/drasa_online/work/models/t001_hub/fx_lightbeam_01.n3",
+        "C:/drasa_online/work/models/t001_hub/tile_catwalk_fence_01.n3",
+        "C:/drasa_online/work/models/t001_hub/tile_catwalk_fence_02.n3",
+       "C:/drasa_online/work/models/t010_caribbean_01/fx_neferati_fog_04.n3"
     };
 
+    /*
     for (auto& n3FullPath : n3Files) {
         Parser parser;
-        if (!parser.parse_file(n3FullPath)) continue;
-
+        if (!parser.parse_file(n3FullPath)){
+            errout << "Cannot parse\n";
+            continue;
+        }
         for (auto& node : parser.getNodes()) node->buildLocalMatrix();
         computeHierarchyMatrices(parser.getNodes());
 
-        for (auto& node : parser.getNodes()) {
-            if (node->mesh_resource_id.empty()) continue;
-
-            DrawCmd dc;
-            dc.group = node->primitive_group_idx;
-            memcpy(dc.worldMatrix, node->worldMatrix, sizeof(dc.worldMatrix));
-
-            dc.tex[0] = loadNebTex(node->shader_textures, "DiffMap0");
-            dc.tex[1] = loadNebTex(node->shader_textures, "SpecMap0");
-            dc.tex[2] = loadNebTex(node->shader_textures, "BumpMap0");
-            dc.tex[3] = loadNebTex(node->shader_textures, "EmsvMap0");
-            for (int i = 0; i < 4; ++i) dc.has[i] = (dc.tex[i] != 0);
-
-            std::string meshPath = node->mesh_resource_id;
-            if (meshPath.rfind("msh:", 0) == 0) meshPath = meshPath.substr(4);
-            meshPath = "C:/drasa_online/work/meshes/" + meshPath;
-
-            if (!LoadNVX2(meshPath, dc.mesh)) continue;
-
-            for (int s = 0; s < 4; ++s) {
-                auto it = node->uvXformBySlot.find(s);
-                if (it != node->uvXformBySlot.end()) {
-                    dc.uvXform[s][0] = it->second[0];
-                    dc.uvXform[s][1] = it->second[1];
-                    dc.uvXform[s][2] = it->second[2];
-                    dc.uvXform[s][3] = it->second[3];
-                }
-                auto iu = node->uvSetBySlot.find(s);
-                if (iu != node->uvSetBySlot.end()) dc.uvSet[s] = iu->second;
-            }
-            sceneDraws.push_back(std::move(dc));
-
+        auto draws = BuildDrawsFromNodes(parser);
+        for (auto& dc : draws) {
+           // ApplyOverride(n3FullPath, dc);
+           // fromNodes.push_back(std::move(dc));
         }
+    }*/
+
+    auto appendN3WTransform = [&](const std::string& path,
+        const glm::vec3& pos,
+        const glm::vec3& rot,
+        const glm::vec3& scale)
+        {
+            Parser parser;
+            if (!parser.parse_file(path)) return;
+            for (auto& node : parser.getNodes()) node->buildLocalMatrix();
+            computeHierarchyMatrices(parser.getNodes());
+
+            auto draws = BuildDrawsWithTransform(parser, pos, rot, scale);
+            for (auto& dc : draws) withTransform.push_back(std::move(dc));
+        };
+
+    //appendN3WTransform("C:/drasa_online/work/models/t000_char/ground_02.n3",
+    //    { 0.207103,0.125945,-1.487267 }, { 0,0,0 }, { 1,1,1 });
+
+    /*
+    appendN3WTransform("C:/drasa_online/work/models/t001_hub/arch_house_01.n3",
+        { -5,0,0 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t001_hub/arch_house_01.n3",
+        { 0,0,0 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t001_hub/arch_house_01.n3",
+        { 5,0,0 }, { 0,0,0 }, { 1,1,1 });
+    
+    appendN3WTransform("C:/drasa_online/work/models/t001_hub/tile_ground_stone_01_var_01.n3",
+        { 0,0,0 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t001_hub/tile_ground_stone_border_01.n3",
+        { 5,0,0 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t001_hub/tile_ground_stone_corner_01.n3",
+        { 10,0,0 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t001_hub/tile_pier_bar_01.n3",
+        { 15,0,0 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t001_hub/tile_pier_bar_02.n3",
+        { 20,0,0 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t001_hub/tile_ramp_03.n3",
+        { 25,0,0 }, { 0,0,0 }, { 1,1,1 });
+
+    appendN3WTransform("C:/drasa_online/work/models/m016_mountain_fortress/deco_rubble_bruned_01.n3",
+        { 0.207103,0.125945,-1.487267 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t000_char/char_screen_stone_01.n3",
+        { -4.929287,-0.062122,-10.496880 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t000_char/char_screen_stone_01.n3",
+        { 7.742453,0.606517,-14.063550 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t000_char/char_screen_stone_01.n3",
+        { -6.172833,0.694790,-2.424380 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t000_char/char_screen_stone_01.n3",
+        { 2.273689,-0.121829,-13.564480 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t000_char/char_screen_stone_01.n3",
+        { -5.296444,0.583664,-5.641184 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t000_char/char_screen_stone_01.n3",
+        { 3.815803,0.492663,-14.623500 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t000_char/char_screen_stone_01.n3",
+        { -6.011575,1.295615,-12.791900 }, { 0,0,0 }, { 1,1,1 });
+
+    appendN3WTransform("C:/drasa_online/work/models/t000_char/char_screen_stone_streaked_01.n3",
+        { 3.815803,0.492663,-14.623500 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t000_char/deco_stone_03.n3",
+        { -6.011575,1.295615,-12.791900 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t000_char/deco_stone_03.n3",
+        { 6.787735,-0.046394,-10.666000 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t000_char/deco_stone_plate_01.n3",
+        { 5.115231,-0.174960,-10.977040 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t000_char/stone_platish_01.n3",
+        { 5.618426,0.946000,-11.598300 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t000_char/char_screen_stone_streaked_01.n3",
+        { 5.565071,0.159313,-4.693389 }, { 0,0,0 }, { 1,1,1 });
+
+    appendN3WTransform("C:/drasa_online/work/models/t000_char/char_screen_stone_01.n3",
+        { 1.319173,-0.076579,-7.056397 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t000_char/char_screen_stone_01.n3",
+        { 1.319173,-0.076579,-7.056397 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t000_char/char_screen_stone_01.n3",
+        { -1.839560,-0.049209,-0.832065 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t000_char/char_screen_stone_01.n3",
+        { -0.504863,-0.585045,-15.265860 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t000_char/char_screen_stone_01.n3",
+        { -1.333145,-0.670562,1.624351 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t000_char/char_screen_stone_01.n3",
+        { 2.357347,-0.049209,-1.453099 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t000_char/char_screen_stone_01.n3",
+        { 2.357347,-0.049209,-4.259654 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t000_char/char_screen_stone_01.n3",
+        { 1.061164,-1.507582,3.526766 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t000_char/char_screen_stone_01.n3",
+        { -2.522160,-0.049209,-4.257953 }, { 0,0,0 }, { 1,1,1 });
+
+    appendN3WTransform("C:/drasa_online/work/models/t000_char/deco_stone_03.n3",
+        { -4.502991,1.460832,-5.866385 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t000_char/deco_stone_03.n3",
+        { 5.320754,1.779095,-4.419336 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t000_char/deco_stone_03.n3",
+        { 3.009094,0.651966,-12.839520 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t000_char/deco_stone_03.n3",
+        { 2.665146,-0.066272,-15.897940 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t000_char/deco_stone_03.n3",
+        { 3.771819,4.060757,-19.829241 }, { 0,0,0 }, { 1,1,1 });
+
+
+    appendN3WTransform("C:/drasa_online/work/models/t001_hub/tile_catwalk_fence_01.n3",
+        { -4.0, -3.95, -7.625 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t001_hub/tile_catwalk_fence_01.n3",
+        { -4.0, -3.625, -6.0 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t001_hub/tile_catwalk_fence_01.n3",
+        { -4.0, -3.625, -4.375 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t001_hub/tile_catwalk_fence_01.n3",
+        { -4.0, -3.625, -2.75 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t001_hub/tile_catwalk_fence_01.n3",
+        { -4.0, -3.625, -1.125 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t001_hub/tile_catwalk_fence_01.n3",
+        { -4.0, -3.625, 0.5 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t001_hub/tile_catwalk_fence_01.n3",
+        { 4.75, -0.346, -15.125 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t001_hub/tile_catwalk_fence_01.n3",
+        { -4.0, -0.346, -7.625 }, { 0,0,0 }, { 1,1,1 });
+
+    appendN3WTransform("C:/drasa_online/work/models/t001_hub/tile_catwalk_fence_02.n3",
+        { 5.0, 4.318, -7.25 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t001_hub/tile_catwalk_fence_02.n3",
+        { 5.125, 2.75, -2.875 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t001_hub/tile_catwalk_fence_02.n3",
+        { 5.625, 3.0, -7.0 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t001_hub/tile_catwalk_fence_02.n3",
+        { -4.563, 2.75, -2.375 }, { 0,0,0 }, { 1,1,1 });
+    appendN3WTransform("C:/drasa_online/work/models/t001_hub/tile_catwalk_fence_02.n3",
+        { -4.563, 4.0, -19.0 }, { 0,0,0 }, { 1,1,1 });
+
+        */
+
+  //  appendN3WTransform("C:/drasa_online/work/models/t001_hub/tile_catwalk_fence_01.n3",
+  //      { -4.976412,-0.039607,0.503584 }, { 0,0,0 }, { 1,1,1 });
+  //  appendN3WTransform("C:/drasa_online/work/models/t001_hub/tile_catwalk_fence_01.n3",
+  //      { 4.455561,-0.213331,-9.086962 }, { 0,0,0 }, { 1,1,1 });
+
+    logout << "=== fromNodes === Count " << fromNodes.size() << "\n";
+    for (auto& dc : fromNodes) {
+        float px, py, pz;
+        extractPos(dc.worldMatrix, px, py, pz);
+       // std::cout << dc.name << " pos(" << px << "," << py << "," << pz << ")\n";
     }
 
+    logout << "\n=== wTransform === Count " << withTransform.size() << "\n";
+    for (auto& dc : withTransform) {
+        float px, py, pz;
+        extractPos(dc.worldMatrix, px, py, pz);
+       // std::cout << dc.name << " pos(" << px << "," << py << "," << pz << ")\n";
+    }
+
+  //  sceneDraws.clear();
+  //  if (!LoadSceneFromJson("C:/drasa_online/work/a0000_char.json")) errout << "[SCENE] load failed\n";
+  //  DumpSceneDraws();
+
     glUseProgram(shaderProgram);
+
     glUniform1i(glGetUniformLocation(shaderProgram, "DiffMap"), 0);
     glUniform1i(glGetUniformLocation(shaderProgram, "SpecMap"), 1);
     glUniform1i(glGetUniformLocation(shaderProgram, "BumpMap"), 2);
     glUniform1i(glGetUniformLocation(shaderProgram, "EmissiveMap"), 3);
 
-    glUniform1f(glGetUniformLocation(shaderProgram, "SpecularPower"), 26.0f);
+    glUniform3f(glGetUniformLocation(shaderProgram, "SunDir"), -0.3f, -1.0f, -0.2f);
+    glUniform3f(glGetUniformLocation(shaderProgram, "SunColor"), 1.0f, 0.95f, 0.85f);
+    glUniform1f(glGetUniformLocation(shaderProgram, "SunIntensity"), 2.0f);
+    glUniform3f(glGetUniformLocation(shaderProgram, "AmbientColor"), 0.25f, 0.25f, 0.25f);
+
+    glUniform1f(glGetUniformLocation(shaderProgram, "SpecularPower"), 64.0f);
     glUniform1f(glGetUniformLocation(shaderProgram, "SpecularIntensity"), 1.0f);
     glUniform1f(glGetUniformLocation(shaderProgram, "EmissiveIntensity"), 1.0f);
-    glUniform3f(glGetUniformLocation(shaderProgram, "LightDir"), 0.2f, 1.0f, 0.3f);
-    glUseProgram(0);
 
-    ensureFallbacks();
+   // glUniform1i(glGetUniformLocation(shaderProgram, "HasBump"), 1);
+   // glUniform1i(glGetUniformLocation(shaderProgram, "HasSpec"), 1);
+
+    int uvSet[4] = { 0, 0, 0, 0 };
+    glUniform1iv(glGetUniformLocation(shaderProgram, "UvSet"), 4, uvSet);
+
+    float uvXform[16] = {
+        1, 1, 0, 0,
+        1, 1, 0, 0,
+        1, 1, 0, 0,
+        1, 1, 0, 0
+    };
+    glUniform4fv(glGetUniformLocation(shaderProgram, "UvXform"), 4, uvXform);
+
+    glUseProgram(0);
 
     glEnable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
@@ -2219,13 +3476,19 @@ int main(int argc, char* argv[])
         boneId[i * 16 + 15] = 1.0f;
     }
 
-   // glEnable(GL_BLEND);
-    //glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-   // glEnable(GL_ALPHA_TEST);
+    // glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+    // glEnable(GL_BLEND);
+    // glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    // glEnable(GL_ALPHA_TEST);
 
+    FPSOverlay fps;
+    InitDDSQuad();
+
+    fps.Init((int)sizeX, (int)sizeY);
     while (!glfwWindowShouldClose(window))
     {
         processInput(window);
+        fps.Update();
 
         glClearColor(0, 0, 0, 0);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -2233,7 +3496,7 @@ int main(int argc, char* argv[])
         glUseProgram(shaderProgram);
 
         float projectionMatrix[16];
-        createPerspectiveMatrix(projectionMatrix, 45.0f, (float)sizeX / (float)sizeY, 0.1f, 100.0f);
+        createPerspectiveMatrix(projectionMatrix, 45.0f, (float)sizeX / (float)sizeY, 0.1f, 1500.0f);
         glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "projection"), 1, GL_FALSE, projectionMatrix);
 
         float viewMatrix[16];
@@ -2243,13 +3506,15 @@ int main(int argc, char* argv[])
         createLookAtMatrix(viewMatrix, camX, camY, camZ, targetX, targetY, targetZ, 0.0f, 1.0f, 0.0f);
         glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "view"), 1, GL_FALSE, viewMatrix);
         glUniform3f(glGetUniformLocation(shaderProgram, "CameraPos"), camX, camY, camZ);
+        glUniform3f(glGetUniformLocation(shaderProgram, "PointPos"), camX, camY, camZ);
 
         GLint boneLoc = glGetUniformLocation(shaderProgram, "BoneMatrices[0]");
         if (boneLoc >= 0) {
             glUniformMatrix4fv(boneLoc, 128, GL_FALSE, boneId.data());
         }
 
-        for (auto& obj : sceneDraws) {
+        // swap withTransform and fromNodes
+        for (auto& obj : withTransform) {
             glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "model"), 1, GL_FALSE, obj.worldMatrix);
 
             GLuint d = obj.has[0] ? obj.tex[0] : gWhiteTex;
@@ -2290,20 +3555,77 @@ int main(int argc, char* argv[])
             glBindVertexArray(0);
         }
 
+        /*
+        for (auto& obj : fromNodes) {
+            glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "model"), 1, GL_FALSE, obj.worldMatrix);
+
+            GLuint d = obj.has[0] ? obj.tex[0] : gWhiteTex;
+            GLuint s = obj.has[1] ? obj.tex[1] : gBlackTex;
+            GLuint n = obj.has[2] ? obj.tex[2] : gFlatNormalTex;
+            GLuint e = obj.has[3] ? obj.tex[3] : gBlackTex;
+
+            glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, d);
+            glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, s);
+            glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, n);
+            glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, e);
+
+            glUniform1i(glGetUniformLocation(shaderProgram, "HasDiff"), obj.has[0] ? 1 : 0);
+            glUniform1i(glGetUniformLocation(shaderProgram, "HasSpec"), obj.has[1] ? 1 : 0);
+            glUniform1i(glGetUniformLocation(shaderProgram, "HasBump"), obj.has[2] ? 1 : 0);
+            glUniform1i(glGetUniformLocation(shaderProgram, "HasEmissive"), obj.has[3] ? 1 : 0);
+
+            glUniform4fv(glGetUniformLocation(shaderProgram, "UvXform[0]"), 4, &obj.uvXform[0][0]);
+            glUniform1iv(glGetUniformLocation(shaderProgram, "UvSet[0]"), 4, obj.uvSet);
+
+            obj.applyUVTransforms(shaderProgram);
+
+            glBindVertexArray(obj.mesh.vao);
+
+            if (!obj.mesh.idx.empty()) {
+                if (obj.group >= 0 && obj.group < (int)obj.mesh.groups.size()) {
+                    const Nvx2Group& g = obj.mesh.groups[obj.group];
+                    const GLsizei count = (GLsizei)g.indexCount();
+                    const GLsizei offset = (GLsizei)(g.firstIndex() * sizeof(uint32_t));
+                    const GLint   base = (GLint)g.baseVertex();
+                    glDrawElementsBaseVertex(GL_TRIANGLES, count, GL_UNSIGNED_INT, (void*)(intptr_t)offset, base);
+                }
+                else {
+                    glDrawElements(GL_TRIANGLES, (GLsizei)obj.mesh.idx.size(), GL_UNSIGNED_INT, 0);
+                }
+            }
+
+            glBindVertexArray(0);
+        }
+        */
+
+        DrawGrid(gridShaderProgram, viewMatrix, projectionMatrix);
+
+        fps.Render();
+
+        RenderDDSQuad();
+
         glUseProgram(0);
         glfwSwapBuffers(window);
         glfwPollEvents();
     }
 
-    for (auto& obj : sceneDraws) {
+    for (auto& obj : withTransform) {
         glDeleteVertexArrays(1, &obj.mesh.vao);
         glDeleteBuffers(1, &obj.mesh.vbo);
         glDeleteBuffers(1, &obj.mesh.ebo);
     }
+    for (auto& obj : fromNodes) {
+        glDeleteVertexArrays(1, &obj.mesh.vao);
+        glDeleteBuffers(1, &obj.mesh.vbo);
+        glDeleteBuffers(1, &obj.mesh.ebo);
+    }
+    CleanupGrid();
     for (auto& pair : gTexCache) glDeleteTextures(1, &pair.second);
     gTexCache.clear();
-    sceneDraws.clear();
+    withTransform.clear();
+    fromNodes.clear();
     glDeleteProgram(shaderProgram);
+    glDeleteProgram(gridShaderProgram);
     glfwTerminate();
     return 0;
 }
