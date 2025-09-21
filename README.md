@@ -1,7 +1,7 @@
 # neb3map-viewer
-Drakensang Online Model & Map Viewer
+Drakensang Online Model Viewer
 
-In serious WIP!
+![alt text](https://imgur.com/0JLqViC)
 
 The Nebula model viewew is simple glfw3 with glad loader,DirectXTex for old DDS parsing
 The system is simple, it parses n3 and nvx2, takes the mesh from nvx2 and extracts the textures from n3, nothing else
@@ -17,20 +17,5 @@ The n3:
 linker for the nvx2 files, sets all the shaders, materials, animations etc
 Handles enormous amount of FourCC data tags, skipping unneeded so it can gracefully load the model
 
-FourCC structure of the .map binary:
-After some investigation, the .map binary is just raw container containing transform bitpacked data and some mesh references(some objects name are empty):
-Containing this structure:
-MOSD @ 0x00000000
-IPAM @ 0x00000008
-TRTS @ 0x00000042
-TTES @ 0x000003F2
-TEVE @ 0x000003FA
-LAME @ 0x00000402
-LPMT @ 0x0000040C
-TSNI @ 0x0000077E
-SNII @ 0x0000077F
-PORG @ 0x00001839
-BVAN @ 0x00001841
-
-Made with V143 toolset, C++17 for x64 
+Made with V145 toolset, C++17 for x64 
 Thanks to: gyoerkaa for the nvx2loader! And Gscept!
