@@ -18,15 +18,18 @@
     <ClCompile Include="n3map-viewer.cc">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\Downloads\current-neb3viewer\current-091725\libs\glad\src\glad.c">
+    <ClCompile Include="D:\cdcdc\asdd\libs\glad\src\glad.c">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="libs\imgui\imstb_textedit.h">
+    <ClInclude Include="..\..\..\Downloads\stb_image.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="libs\imgui\imstb_truetype.h">
+    <ClInclude Include="libs\imgui\backends\imgui_impl_glfw.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="libs\imgui\backends\imgui_impl_opengl3.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="libs\imgui\imgui.h">
@@ -38,13 +41,10 @@
     <ClInclude Include="libs\imgui\imstb_rectpack.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="libs\imgui\backends\imgui_impl_glfw.h">
+    <ClInclude Include="libs\imgui\imstb_textedit.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="libs\imgui\backends\imgui_impl_opengl3.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\..\Downloads\stb_image.h">
+    <ClInclude Include="libs\imgui\imstb_truetype.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

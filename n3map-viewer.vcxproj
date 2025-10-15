@@ -105,7 +105,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;PROJECT_DIR="C:\Users\SIMEON\Documents\neb3map-viewer";%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>$(ProjectDir)libs\nlohmannjson;$(ProjectDir)libs\DirectXTex\include;$(ProjectDir)libs\glfw\include;$(ProjectDir)libs\glad\include;$(ProjectDir)libs\imgui;$(ProjectDir)libs\imgui\backends;$(ProjectDir)libs\glm</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)libs\DirectXTex\include;$(ProjectDir)libs\glfw\include;$(ProjectDir)libs\glad\include;$(ProjectDir)libs\imgui;$(ProjectDir)libs\imgui\backends;$(ProjectDir)libs\glm</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
@@ -113,8 +113,7 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>C:\Users\SIMEON\Documents\neb3map-viewer\libs\DirectXTex\lib;C:\Users\SIMEON\Documents\neb3map-viewer\libs\glfw\lib-vc2022;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>glfw3_mt.lib
-;opengl32.lib;DirectXTex.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>glfw3_mt.lib;opengl32.lib;DirectXTex.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -132,7 +131,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="..\..\Downloads\current-neb3viewer\current-091725\libs\glad\src\glad.c" />
+    <ClCompile Include="D:\cdcdc\asdd\libs\glad\src\glad.c" />
     <ClCompile Include="n3map-viewer.cc" />
   </ItemGroup>
   <ItemGroup>
